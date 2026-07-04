@@ -1,0 +1,132 @@
+# mruby-gpu-narray
+
+> **Numo-like N-dimensional array for mruby, computed on the GPU via Vulkan Compute.**
+> The code you prototype with is the code you deploy to the edge — no Python→C++ rewrite.
+
+🚧 **Work in progress** — a proof-of-concept toward 名古屋Ruby会議05 (2026-09-19).
+Built on the Vulkan compute core of [mruby-gpu](https://github.com/yujiteshima/mruby-gpu).
+
+```ruby
+a = GPU::SFloat.new(1024).seq   # like Numo::SFloat.new(1024).seq
+b = a * 2 + 1                    # runs on the GPU (no host copy)
+b.to_a                           # only now is data copied back to the host
+b.sum                            # GPU reduction -> Float
+```
+
+## Why
+
+GPU work today crosses two walls: a **language wall** (prototype in Python, ship in
+C++/CUDA) and an **environment wall** (rich GPU → edge device). mruby exists precisely
+for the environments too small for CRuby or Python. If mruby can drive the GPU, the
+prototype and the deployed program can be the *same* mruby code — the rewrite disappears.
+
+`mruby-gpu-narray` starts that stack with the missing foundation: an N-dimensional
+array (the NumPy/CuPy layer), backed by GPU memory from the first line. Vulkan Compute
+is the backend so the same code runs from a workstation down to a Raspberry Pi 5.
+
+## Status — what works today
+
+This is the **L1 (array foundation)** layer, FP32 and 1-D:
+
+| Area | API |
+|---|---|
+| Construct | `GPU::SFloat.new(n)`, `.cast(array)`, `GPU::SFloat[…]`, `.zeros(n)`, `.ones(n)` |
+| Initialize | `#seq(start=0, step=1)`, `#fill(v)` |
+| Element-wise (array ⊗ array) | `+  -  *  /` |
+| Scalar (array ⊗ number) | `+  -  *  /`, unary `-@` |
+| Reduction | `#sum`, `#mean` |
+| Host transfer | `#to_a`, `#head(k)` |
+| Metadata | `#size` / `#length`, `#shape`, `#ndim` |
+| Device | `GPU.info`, `GPU.device_name`, `GPU.init(dir)` |
+
+Data lives in a `VkBuffer` the whole time; the only host copies happen in `#to_a` /
+`#head`. Arithmetic and reduction are Vulkan compute dispatches.
+
+Scalar arithmetic is supported with the **array on the left** (`a * 2`). The reverse
+(`2 * a`) raises `TypeError` — full numeric coercion is future work (see Roadmap).
+
+## Requirements
+
+- A Vulkan 1.1+ loader and a compute-capable device.
+  - **Target:** Raspberry Pi 5 / VideoCore VII (Mesa V3D).
+  - **Dev:** also runs on macOS via MoltenVK (portability is auto-detected).
+- `glslangValidator` (from the Vulkan SDK / `glslang`) to compile the shaders.
+- mruby 3.x.
+
+The gem's only link dependency is the Vulkan loader (`-lvulkan`).
+
+## Build
+
+`mruby-gpu-narray` is an mrbgem. Add it to your `build_config.rb`:
+
+```ruby
+MRuby::Build.new do |conf|
+  conf.toolchain
+  conf.gembox 'default'
+  conf.gem '/path/to/mruby-gpu-narray'
+  # On macOS, point at Homebrew's Vulkan (skip on Linux/Pi, where it's standard):
+  # conf.cc.include_paths     << '/opt/homebrew/include'
+  # conf.linker.library_paths << '/opt/homebrew/lib'
+end
+```
+
+Compile the compute shaders to SPIR-V, then build mruby:
+
+```sh
+make -C /path/to/mruby-gpu-narray/shader   # add.spv, sub.spv, …, sum.spv
+cd /path/to/mruby && MRUBY_CONFIG=build_config.rb rake
+```
+
+`mrbgem.rake` bakes the absolute shader directory into a generated header, so
+`GPU.init` is optional — the first GPU operation initializes lazily. You can still
+call `GPU.init("/some/shader/dir")` explicitly to override it.
+
+Try it:
+
+```sh
+./build/host/bin/mruby /path/to/mruby-gpu-narray/examples/narray_basics.rb
+./build/host/bin/mruby /path/to/mruby-gpu-narray/test/narray_test.rb   # ALL TESTS PASSED
+```
+
+## How it works
+
+```
+GPU::SFloat (mruby)                         mrblib/gpu_narray.rb  (shape, mean, inspect, zeros/ones/[])
+   │  a * 2 + 1
+   ▼
+src/gpu_narray.c    dtype methods; picks a pipeline; keeps results on the GPU
+   ▼
+src/gpu_vulkan.c    dispatch_compute(): descriptor set → command buffer → submit → fence
+   ▼
+shader/*.comp       add / sub / mul / div / scale / adds / sum  (GLSL → SPIR-V)
+   ▼
+Vulkan driver → GPU (VideoCore VII on the Pi, or Metal via MoltenVK on macOS)
+```
+
+`sum` is a two-level reduction: each workgroup reduces 256 elements in shared memory
+to one partial, and the host adds the partials in double precision.
+
+## Roadmap
+
+- **L3 — VkFFT** ([VkFFT](https://github.com/DTolm/VkFFT)): FFT sharing the same
+  `VkBuffer`s. The highest-value domain piece (signal/vibration processing).
+- **L2 — kernel DSL**: turn a Ruby block into a compute shader by tracing operator
+  overloads → GLSL → SPIR-V, so `na.map { |x| x * 2 + sin(x) }` runs on the GPU.
+- **L1 growth**: 2-D + minimal broadcast, more element-wise ops (`sqrt`/`exp`/`sin`),
+  `min`/`max`, scalar-on-left coercion.
+- **Backends**: a CUDA backend for Jetson behind the same mruby API.
+
+Out of scope for now: dense linear algebra (GEMM/SVD/eigen) — Vulkan has no cuBLAS-class
+library, so it isn't worth the effort yet.
+
+## Relationship to mruby-gpu
+
+[mruby-gpu](https://github.com/yujiteshima/mruby-gpu) is the predecessor: a Vulkan
+compute mrbgem (plus camera / face detection / display) for the Pi. This project lifts
+its proven Vulkan core (context init, host-visible buffers with a GC finalizer, generic
+compute dispatch) and builds a Numo-like numeric array on top, dropping the
+image/ML-specific parts.
+
+## License
+
+MIT © 2026 Yuji Teshima
