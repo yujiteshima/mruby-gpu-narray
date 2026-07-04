@@ -14,16 +14,23 @@ b.to_a                           # only now is data copied back to the host
 b.sum                            # GPU reduction -> Float
 ```
 
-## Why
+## Motivation
 
-GPU work today crosses two walls: a **language wall** (prototype in Python, ship in
-C++/CUDA) and an **environment wall** (rich GPU → edge device). mruby exists precisely
-for the environments too small for CRuby or Python. If mruby can drive the GPU, the
-prototype and the deployed program can be the *same* mruby code — the rewrite disappears.
+Python has CuPy: change `import numpy` to `import cupy` and your array code runs on the
+GPU. Ruby's small sibling, mruby, has nothing like it — and CuPy itself is CUDA-only, so
+it never reaches the GPUs on boards like the Raspberry Pi.
 
-`mruby-gpu-narray` starts that stack with the missing foundation: an N-dimensional
-array (the NumPy/CuPy layer), backed by GPU memory from the first line. Vulkan Compute
-is the backend so the same code runs from a workstation down to a Raspberry Pi 5.
+Two things make this a real gap, not a quick port:
+
+- **mruby is not "small CRuby."** Its C API, build system, and GC differ completely, so
+  CRuby's arrays (Numo, and its CUDA cousin Cumo) don't run on mruby at all.
+- **Vulkan has no cuBLAS/cuFFT-class library to lean on.** CuPy is easy because it wraps
+  NVIDIA's mature libraries; on Vulkan you build the pieces yourself.
+
+So `mruby-gpu-narray` builds the missing foundation natively: a Numo-like array whose
+data lives in GPU memory from the first line, on Vulkan Compute — the *same* mruby code
+runs from a workstation down to a Raspberry Pi 5. Moving a prototype to the edge no
+longer means a Python→C++ rewrite.
 
 ## Status — what works today
 
