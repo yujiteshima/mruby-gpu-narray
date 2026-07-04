@@ -189,9 +189,28 @@ void gpu_init(const char *shader_dir) {
   };
   vkCreateInstance(&inst_info, NULL, &g_ctx.instance);
 
-  /* Physical Device (pick first) */
-  uint32_t dev_count = 1;
-  vkEnumeratePhysicalDevices(g_ctx.instance, &dev_count, &g_ctx.physical_device);
+  /* Physical Device: prefer a real GPU over a software rasterizer.
+   * The Pi exposes both V3D (hardware) and llvmpipe (CPU); pick the first
+   * non-CPU device so compute actually runs on the GPU. Falls back to the
+   * first device if every device is CPU-type. */
+  uint32_t dev_count = 0;
+  vkEnumeratePhysicalDevices(g_ctx.instance, &dev_count, NULL);
+  if (dev_count == 0) {
+    fprintf(stderr, "mruby-gpu-narray: no Vulkan physical device found\n");
+    return;
+  }
+  VkPhysicalDevice *devs = malloc(sizeof(VkPhysicalDevice) * dev_count);
+  vkEnumeratePhysicalDevices(g_ctx.instance, &dev_count, devs);
+  g_ctx.physical_device = devs[0];
+  for (uint32_t i = 0; i < dev_count; i++) {
+    VkPhysicalDeviceProperties p;
+    vkGetPhysicalDeviceProperties(devs[i], &p);
+    if (p.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) {
+      g_ctx.physical_device = devs[i];
+      break;
+    }
+  }
+  free(devs);
 
   /* Queue Family (compute) */
   uint32_t qf_count = 0;
