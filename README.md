@@ -78,14 +78,18 @@ MRuby::Build.new do |conf|
 end
 ```
 
-Compile the compute shaders to SPIR-V, then build mruby:
+Then build mruby:
 
 ```sh
-make -C /path/to/mruby-gpu-narray/shader   # add.spv, sub.spv, …, sum.spv
 cd /path/to/mruby && MRUBY_CONFIG=build_config.rb rake
 ```
 
-`mrbgem.rake` bakes the absolute shader directory into a generated header, so
+The compute shaders are compiled to SPIR-V automatically during the build (via
+`glslangValidator`, found on `PATH` or set `GLSLANG=`). No manual step is needed;
+`make -C shader` remains available as a fallback if `glslangValidator` is absent
+at build time.
+
+`mrbgem.rake` also bakes the absolute shader directory into a generated header, so
 `GPU.init` is optional — the first GPU operation initializes lazily. You can still
 call `GPU.init("/some/shader/dir")` explicitly to override it.
 
