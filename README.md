@@ -3,8 +3,8 @@
 > **Numo-like N-dimensional array for mruby, computed on the GPU via Vulkan Compute.**
 > The code you prototype with is the code you deploy to the edge — no Python→C++ rewrite.
 
-🚧 **Work in progress** — an early but working GPU N-dimensional array for mruby
-(FP32, 1-D so far). Built on the Vulkan compute core of
+🚧 **Work in progress** — an early but working GPU array library for mruby
+(FP32, 1-D today; N-dimensional planned). Built on the Vulkan compute core of
 [mruby-gpu](https://github.com/yujiteshima/mruby-gpu).
 
 ```ruby
