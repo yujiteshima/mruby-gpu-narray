@@ -1,0 +1,19 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer BufA { float a[]; };
+layout(set = 0, binding = 1) buffer BufB { float b[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    float scalar;
+} pc;
+
+// b = a * scalar   (used for narray * scalar, and narray / scalar via 1/scalar)
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < pc.n) {
+        b[idx] = a[idx] * pc.scalar;
+    }
+}
