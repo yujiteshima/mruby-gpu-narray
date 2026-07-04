@@ -139,6 +139,12 @@ its proven Vulkan core (context init, host-visible buffers with a GC finalizer, 
 compute dispatch) and builds a Numo-like numeric array on top, dropping the
 image/ML-specific parts.
 
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how to build,
+test, and submit changes (the build needs a Vulkan loader and `glslangValidator`), and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
+
 ## License
 
 MIT © 2026 Yuji Teshima
