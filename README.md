@@ -46,7 +46,7 @@ Data lives in a `VkBuffer` the whole time; the only host copies happen in `#to_a
 ### Verified on
 
 - **Raspberry Pi 5** — VideoCore VII, Mesa V3DV (`V3D 7.1.10.2`, Vulkan 1.3): all 28 tests pass.
-- **macOS** — Apple M-series GPU via MoltenVK (Vulkan 1.4): all 28 tests pass (development host).
+- **macOS** — Apple M-series GPU via MoltenVK: all 28 tests pass (development host).
 
 The same source runs on both; the only difference is the Homebrew include/lib paths in
 `build_config.rb` on macOS.
@@ -57,7 +57,7 @@ Scalar arithmetic is supported with the **array on the left** (`a * 2`). The rev
 ## Requirements
 
 - A Vulkan 1.1+ loader and a compute-capable device.
-  - **Target:** Raspberry Pi 5 / VideoCore VII (Mesa V3D).
+  - **Target:** Raspberry Pi 5 / VideoCore VII (Mesa V3DV).
   - **Dev:** also runs on macOS via MoltenVK (portability is auto-detected).
 - `glslangValidator` (from the Vulkan SDK / `glslang`) to compile the shaders.
 - mruby 3.x.
@@ -70,7 +70,7 @@ The gem's only link dependency is the Vulkan loader (`-lvulkan`).
 
 ```ruby
 MRuby::Build.new do |conf|
-  conf.toolchain
+  conf.toolchain :gcc          # use :clang on macOS
   conf.gembox 'default'
   conf.gem '/path/to/mruby-gpu-narray'
   # On macOS, point at Homebrew's Vulkan (skip on Linux/Pi, where it's standard):
