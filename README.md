@@ -42,6 +42,14 @@ This is the **L1 (array foundation)** layer, FP32 and 1-D:
 Data lives in a `VkBuffer` the whole time; the only host copies happen in `#to_a` /
 `#head`. Arithmetic and reduction are Vulkan compute dispatches.
 
+### Verified on
+
+- **Raspberry Pi 5** — VideoCore VII, Mesa V3DV (`V3D 7.1.10.2`, Vulkan 1.3): all 28 tests pass.
+- **macOS** — Apple M-series GPU via MoltenVK (Vulkan 1.4): all 28 tests pass (development host).
+
+The same source runs on both; the only difference is the Homebrew include/lib paths in
+`build_config.rb` on macOS.
+
 Scalar arithmetic is supported with the **array on the left** (`a * 2`). The reverse
 (`2 * a`) raises `TypeError` — full numeric coercion is future work (see Roadmap).
 
