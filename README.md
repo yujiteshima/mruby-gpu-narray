@@ -47,7 +47,7 @@ built on it:
 | Spectral | `#rfft` → `GPU::SComplex`; `#magnitude(k)`, `#power_spectrum(k)` |
 | Host transfer | `#to_a`, `#head(k)` |
 | Metadata | `#size` / `#length`, `#shape`, `#ndim` |
-| Device | `GPU.info`, `GPU.device_name`, `GPU.init(dir)` |
+| Device | `GPU.info` (device, API version, backend, `:max_workgroups`), `GPU.device_name`, `GPU.init(dir)` |
 
 Data lives in a `VkBuffer` the whole time; the only host copies happen in `#to_a` /
 `#head`. Arithmetic, reduction and the FFT are Vulkan compute dispatches.
@@ -153,6 +153,18 @@ buffer of `2n` floats (interleaved re/im, wrapped as `GPU::SComplex`):
    the in-place writes don't race, and one dispatch per pass is the barrier between
    passes.
 3. `cmag` reduces the spectrum to a real `GPU::SFloat` of magnitudes or powers.
+
+### Limits and failures
+
+One operation is one dispatch, covering 256 elements per workgroup up to the
+device's `maxComputeWorkGroupCount` — `GPU.info[:max_workgroups] * 256`
+elements, about 16.7M where that limit is 65535. Larger arrays raise rather
+than leaving the answer up to the driver.
+
+Failed Vulkan calls raise `RuntimeError` with the call and the `VkResult`.
+A missing shader and a shader the driver rejects are reported differently: the
+first tells you to build the shaders, the second tells you not to bother,
+because the SPIR-V was already there.
 
 ## Roadmap
 

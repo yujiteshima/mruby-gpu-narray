@@ -38,6 +38,16 @@ typedef enum {
 
 typedef enum { LAYOUT_3BUF = 0, LAYOUT_2BUF, LAYOUT_1BUF, LAYOUT_COUNT } LayoutId;
 
+/* Why a pipeline handle is missing. Without this, "the .spv file is absent"
+ * and "the driver rejected the shader" both look like VK_NULL_HANDLE, and the
+ * second one gets reported as the first -- telling the user to run a build
+ * step that has already run. */
+typedef enum {
+  PIPE_READY = 0,     /* created and usable                         */
+  PIPE_MISSING_SPV,   /* <name>.spv could not be read               */
+  PIPE_CREATE_FAILED  /* the driver rejected it; see pipe_error[]    */
+} PipeState;
+
 /* ---- GPU Context (singleton) ---- */
 typedef struct {
   VkInstance instance;
@@ -49,8 +59,12 @@ typedef struct {
   VkDescriptorSetLayout desc_layouts[LAYOUT_COUNT];
   VkPipelineLayout pipe_layouts[LAYOUT_COUNT];
   VkPipeline pipelines[PIPE_COUNT];
+  PipeState pipe_state[PIPE_COUNT];
+  VkResult pipe_error[PIPE_COUNT];
   VkDescriptorPool desc_pool;
+  uint32_t max_workgroups;  /* maxComputeWorkGroupCount[0] */
   int initialized;
+  int init_failed;          /* a previous gpu_init raised; do not retry */
 } GpuCtx;
 
 extern GpuCtx g_ctx;
@@ -65,19 +79,32 @@ typedef struct {
 
 extern const struct mrb_data_type gpu_buffer_type;
 
+/* ---- Error handling ----
+ *
+ * Every Vulkan call that returns a VkResult goes through VK_CHECK, which turns
+ * a failure into an mruby exception. Unchecked, a failed call leaves an
+ * unusable handle behind and the next call either segfaults the VM or -- worse
+ * -- returns whatever happened to be in the buffer as if it were a result.
+ *
+ * gpu_check raises, so it does not return on failure: anything the caller
+ * allocated must be released *before* the call. */
+void gpu_check(mrb_state *mrb, VkResult r, const char *call);
+const char *gpu_result_name(VkResult r);
+#define VK_CHECK(mrb, expr) gpu_check((mrb), (expr), #expr)
+
 /* ---- gpu_vulkan.c ---- */
-void gpu_init(const char *shader_dir);
+void gpu_init(mrb_state *mrb, const char *shader_dir);
 const char *gpu_pipe_name(PipeId pipe_id);
-void dispatch_compute(PipeId pipe_id,
+void dispatch_compute(mrb_state *mrb, PipeId pipe_id,
                       VkBuffer *buffers, VkDeviceSize *sizes, int num_buffers,
                       const void *push_data, uint32_t push_size,
                       uint32_t group_x, uint32_t group_y, uint32_t group_z);
 
 /* ---- gpu_buffer.c ---- */
 GpuBuffer *create_buffer(mrb_state *mrb, uint32_t n);
-void       destroy_buffer(mrb_state *mrb, GpuBuffer *buf);  /* for un-wrapped scratch buffers */
+void       destroy_buffer(mrb_state *mrb, GpuBuffer *buf);  /* GC finalizer + create_buffer unwind */
 mrb_value  wrap_buffer(mrb_state *mrb, struct RClass *klass, GpuBuffer *buf);
-float     *map_buffer(GpuBuffer *buf);
+float     *map_buffer(mrb_state *mrb, GpuBuffer *buf);
 void       unmap_buffer(GpuBuffer *buf);
 
 #endif

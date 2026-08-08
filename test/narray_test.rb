@@ -172,6 +172,25 @@ assert_raise("narray * String -> TypeError", TypeError) do
   GPU::SFloat[1, 2, 3] * "nope"
 end
 
+# Element counts are uint32_t on the GPU side; a larger request must be
+# refused rather than wrapped around into a different length.
+assert_raise("size past uint32 -> ArgumentError", ArgumentError) do
+  GPU::SFloat.new(2**32 + 10)
+end
+
+# One dispatch covers 256 elements per workgroup, bounded by the device's
+# maxComputeWorkGroupCount. Past that the result is up to the driver, so it is
+# rejected instead. Sized off the device, and skipped where the limit is high
+# enough that probing it would mean a multi-gigabyte allocation.
+max_elems = GPU.info[:max_workgroups] * 256
+if max_elems <= 64_000_000
+  assert_raise("array past one dispatch -> ArgumentError", ArgumentError) do
+    GPU::SFloat.new(max_elems + 256).sum
+  end
+else
+  puts "SKIP array past one dispatch (device allows #{max_elems} elements per dispatch)"
+end
+
 # ---- summary ----
 puts
 puts "#{$pass + $fail} tests, #{$pass} passed, #{$fail} failed"
