@@ -96,6 +96,71 @@ assert_near("sum 1..1000 (n=1000)", 500500.0, GPU::SFloat.new(1000).seq(1, 1).su
 assert_near("sum 1M ones",          1_000_000.0, GPU::SFloat.new(1_000_000).fill(1.0).sum)
 assert_near("mean of ones",         1.0, GPU::SFloat.ones(512).mean)
 
+# ---- spectral transform: rfft / magnitude / power_spectrum ----
+# n = 8 against a hand-computed DFT. A constant signal puts all energy in bin 0.
+const8 = GPU::SFloat.new(8).fill(2.0).rfft
+assert_near("rfft(const) size",   8, const8.size)
+assert_near("rfft(const) bin 0",  16.0, const8.to_a[0][0])
+assert_near("rfft(const) bin 0 imag", 0.0, const8.to_a[0][1])
+assert_near("rfft(const) bin 1",  0.0, const8.to_a[1][0])
+
+# cos(2*pi*k*t/n) has magnitude n/2 at bin k (and at bin n-k).
+PI = 3.141592653589793
+
+# Builds cos(2*pi*freq*t/len) for t in 0...len. (Math comes from the default
+# gembox's mruby-math.)
+def tone(len, freq, sine = false)
+  a = []
+  t = 0
+  while t < len
+    ang = 2 * PI * freq * t / len
+    a << (sine ? Math.sin(ang) : Math.cos(ang))
+    t += 1
+  end
+  a
+end
+
+n    = 16
+cos3 = GPU::SFloat.cast(tone(n, 3))
+spec = cos3.rfft
+assert_near("rfft(cos) bin 3 real", n / 2.0, spec.to_a[3][0], 1e-2)
+assert_near("rfft(cos) bin 3 imag", 0.0,     spec.to_a[3][1], 1e-2)
+assert_near("rfft(cos) bin 2 real", 0.0,     spec.to_a[2][0], 1e-2)
+
+# sin has its energy in the imaginary part, negative for the forward transform.
+sin5 = GPU::SFloat.cast(tone(n, 5, true))
+assert_near("rfft(sin) bin 5 imag", -(n / 2.0), sin5.rfft.to_a[5][1], 1e-2)
+
+# magnitude / power default to the non-redundant half (n/2 bins).
+mag = cos3.rfft.magnitude
+assert_near("magnitude size",  n / 2, mag.size)
+assert_near("magnitude bin 3", n / 2.0, mag.to_a[3], 1e-2)
+assert_near("magnitude bin 2", 0.0,     mag.to_a[2], 1e-2)
+assert_near("power bin 3",     (n / 2.0) * (n / 2.0), cos3.power_spectrum.to_a[3], 1e-1)
+assert_near("magnitude count arg size", 4, cos3.rfft.magnitude(4).size)
+
+# Multi-tone: peaks must land on the expected bins and nowhere else.
+n2  = 64
+lo  = tone(n2, 5)
+hi  = tone(n2, 11)
+mix = []
+lo.each_index { |i| mix << lo[i] + hi[i] }
+
+# Each tone contributes n2/2 = 32 in magnitude, so 1024 in power; every other
+# bin is ~0. Anything above (n2/4)^2 = 256 is a peak.
+power = GPU::SFloat.cast(mix).power_spectrum.to_a
+peaks = []
+power.each_index { |i| peaks << i if power[i] > (n2 / 4.0) * (n2 / 4.0) }
+assert_ary("multi-tone peak bins", [5, 11], peaks)
+
+# A length that is not a power of two must be rejected.
+assert_raise("rfft(non power of two) -> ArgumentError", ArgumentError) do
+  GPU::SFloat.new(6).seq.rfft
+end
+assert_raise("SComplex#sum -> NoMethodError", NoMethodError) do
+  GPU::SFloat.new(8).seq.rfft.sum
+end
+
 # ---- errors ----
 assert_raise("shape mismatch -> ArgumentError", ArgumentError) do
   GPU::SFloat[1, 2, 3] + GPU::SFloat[1, 2]

@@ -249,6 +249,91 @@ static mrb_value narray_sum(mrb_state *mrb, mrb_value self) {
 }
 
 /* =========================================================================
+ * Spectral transform (runs on GPU)
+ *
+ * Radix-2 Cooley-Tukey. A length-k complex spectrum lives in a GpuBuffer of
+ * 2k floats, interleaved (re, im) -- that is what GPU::SComplex wraps.
+ * ========================================================================= */
+
+static struct RClass *gpu_class(mrb_state *mrb, const char *name) {
+  return mrb_class_get_under(mrb, mrb_module_get(mrb, "GPU"), name);
+}
+
+/* #rfft -> GPU::SComplex, the n-point DFT of this real array.
+ *
+ * Dispatches once to permute real -> complex into bit-reversed order, then
+ * once per butterfly pass (log2(n) of them). Each dispatch's submit/fence is
+ * the barrier between passes. Nothing is copied to the host. */
+static mrb_value narray_rfft(mrb_state *mrb, mrb_value self) {
+  GpuBuffer *a = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
+  uint32_t n = a->n;
+  if (n < 2 || (n & (n - 1)) != 0) {
+    mrb_raisef(mrb, E_ARGUMENT_ERROR,
+      "rfft needs a power-of-two length >= 2, got %d", (int)n);
+  }
+  ensure_pipeline(mrb, PIPE_FFT_BITREV);
+  ensure_pipeline(mrb, PIPE_FFT_STAGE);
+
+  uint32_t log2n = 0;
+  while ((1u << log2n) < n) log2n++;
+
+  /* Resolve the class before allocating, so nothing can raise between
+   * create_buffer and wrap_buffer (the buffer is untracked until wrapped). */
+  struct RClass *scomplex = gpu_class(mrb, "SComplex");
+  GpuBuffer *x = create_buffer(mrb, 2 * n);
+
+  VkBuffer bitrev_bufs[2]      = {a->buffer, x->buffer};
+  VkDeviceSize bitrev_sizes[2] = {a->bytes,  x->bytes};
+  struct { uint32_t n, log2n; } bitrev_push = {n, log2n};
+  dispatch_compute(PIPE_FFT_BITREV, bitrev_bufs, bitrev_sizes, 2,
+                   &bitrev_push, sizeof(bitrev_push), (n + 255) / 256, 1, 1);
+
+  VkBuffer stage_bufs[1]      = {x->buffer};
+  VkDeviceSize stage_sizes[1] = {x->bytes};
+  uint32_t groups = (n / 2 + 255) / 256;
+  for (uint32_t h = 1; h < n; h <<= 1) {
+    struct { uint32_t n, h; } stage_push = {n, h};
+    dispatch_compute(PIPE_FFT_STAGE, stage_bufs, stage_sizes, 1,
+                     &stage_push, sizeof(stage_push), groups, 1, 1);
+  }
+
+  return wrap_buffer(mrb, scomplex, x);
+}
+
+/* Shared by GPU::SComplex#magnitude and #power_spectrum.
+ * `count` defaults to half the spectrum -- the non-redundant bins of a
+ * real-input transform. */
+static mrb_value complex_reduce(mrb_state *mrb, mrb_value self, uint32_t square) {
+  mrb_int count = -1;
+  mrb_get_args(mrb, "|i", &count);
+  GpuBuffer *x = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
+  uint32_t points = x->n / 2;
+
+  if (count < 0) count = points / 2;          /* omitted -> the useful half */
+  if (count > (mrb_int)points) count = points;
+  ensure_pipeline(mrb, PIPE_CMAG);
+
+  struct RClass *sfloat = gpu_class(mrb, "SFloat");
+  GpuBuffer *out = create_buffer(mrb, (uint32_t)count);
+  VkBuffer bufs[2]      = {x->buffer, out->buffer};
+  VkDeviceSize sizes[2] = {x->bytes,  out->bytes};
+  struct { uint32_t out_n, square; } push = {(uint32_t)count, square};
+  dispatch_compute(PIPE_CMAG, bufs, sizes, 2, &push, sizeof(push),
+                   ((uint32_t)count + 255) / 256, 1, 1);
+  return wrap_buffer(mrb, sfloat, out);
+}
+
+/* #magnitude(count = size / 2) -> GPU::SFloat of sqrt(re^2 + im^2) */
+static mrb_value complex_magnitude(mrb_state *mrb, mrb_value self) {
+  return complex_reduce(mrb, self, 0);
+}
+
+/* #power_spectrum(count = size / 2) -> GPU::SFloat of re^2 + im^2 */
+static mrb_value complex_power_spectrum(mrb_state *mrb, mrb_value self) {
+  return complex_reduce(mrb, self, 1);
+}
+
+/* =========================================================================
  * GPU module functions
  * ========================================================================= */
 
@@ -316,6 +401,17 @@ void mrb_mruby_gpu_narray_gem_init(mrb_state *mrb) {
   MRB_SET_INSTANCE_TT(sfloat, MRB_TT_CDATA);
   mrb_define_class_method(mrb, sfloat, "new",  sfloat_s_new,  MRB_ARGS_REQ(1));
   mrb_define_class_method(mrb, sfloat, "cast", sfloat_s_cast, MRB_ARGS_REQ(1));
+  /* rfft is on SFloat, not NArray: it reads its receiver as real samples,
+   * which is not what an SComplex buffer holds. */
+  mrb_define_method(mrb, sfloat, "rfft", narray_rfft, MRB_ARGS_NONE());
+
+  /* Interleaved (re, im) FP32 spectrum. The Ruby side (mrblib) adjusts the
+   * inherited size / to_a / head for the two-floats-per-point layout. */
+  struct RClass *scomplex = mrb_define_class_under(mrb, gpu, "SComplex", narray);
+  MRB_SET_INSTANCE_TT(scomplex, MRB_TT_CDATA);
+  mrb_define_method(mrb, scomplex, "magnitude", complex_magnitude, MRB_ARGS_OPT(1));
+  mrb_define_method(mrb, scomplex, "power_spectrum",
+                    complex_power_spectrum, MRB_ARGS_OPT(1));
 }
 
 void mrb_mruby_gpu_narray_gem_final(mrb_state *mrb) {

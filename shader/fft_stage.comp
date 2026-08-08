@@ -1,0 +1,48 @@
+#version 450
+
+// One radix-2 Cooley-Tukey butterfly pass over the complex buffer x[]
+// (interleaved re, im), run in place. `h` is the half-size of this pass's
+// sub-transform and doubles each pass: 1, 2, 4, ... n/2.
+//
+// Each invocation owns one butterfly, i.e. one pair (i0, i1). Across a pass
+// those pairs partition [0, n) exactly, so the in-place writes never race
+// within a dispatch; gpu_narray.c issues one dispatch per pass, and that
+// submit/fence boundary is the barrier between passes.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer BufX { float x[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;   // number of complex points
+    uint h;   // half-size of this pass's sub-transform
+} pc;
+
+const float TWO_PI = 6.283185307179586;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= pc.n / 2u) {
+        return;
+    }
+
+    uint m  = pc.h * 2u;
+    uint k  = tid / pc.h;   // which sub-transform
+    uint j  = tid % pc.h;   // position inside it
+    uint i0 = k * m + j;
+    uint i1 = i0 + pc.h;
+
+    float ang = -TWO_PI * float(j) / float(m);
+    vec2  w   = vec2(cos(ang), sin(ang));
+
+    vec2 a = vec2(x[2u * i0], x[2u * i0 + 1u]);
+    vec2 b = vec2(x[2u * i1], x[2u * i1 + 1u]);
+
+    vec2 t = vec2(b.x * w.x - b.y * w.y,     // b * w, complex multiply
+                  b.x * w.y + b.y * w.x);
+
+    x[2u * i0]      = a.x + t.x;
+    x[2u * i0 + 1u] = a.y + t.y;
+    x[2u * i1]      = a.x - t.x;
+    x[2u * i1 + 1u] = a.y - t.y;
+}
