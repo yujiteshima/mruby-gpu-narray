@@ -1,0 +1,27 @@
+#version 450
+
+// Reduce a complex spectrum x[] (interleaved re, im) to a real GPU::SFloat:
+// magnitude sqrt(re^2 + im^2), or power re^2 + im^2 when pc.square is 1.
+// Only the first pc.out_n bins are written.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer BufX   { float x[]; };
+layout(set = 0, binding = 1) buffer BufOut { float outv[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint out_n;
+    uint square;   // 0 -> magnitude, 1 -> power
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.out_n) {
+        return;
+    }
+
+    float re = x[2u * i];
+    float im = x[2u * i + 1u];
+    float p  = re * re + im * im;
+    outv[i]  = (pc.square == 1u) ? p : sqrt(p);
+}

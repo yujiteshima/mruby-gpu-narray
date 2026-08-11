@@ -1,0 +1,30 @@
+#version 450
+
+// Pass 0 of the radix-2 Cooley-Tukey FFT. See gpu_narray.c (narray_rfft).
+//
+// Reads the real signal a[n] and writes it into the complex work buffer x[]
+// (interleaved re, im) at bit-reversed positions. Doing the permutation here
+// lets the following log2(n) butterfly passes run in natural order, in place.
+//
+// n is a power of two >= 2, so log2n >= 1 and the shift below is well defined.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer BufIn  { float a[]; };
+layout(set = 0, binding = 1) buffer BufOut { float x[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint log2n;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) {
+        return;
+    }
+
+    uint r = bitfieldReverse(i) >> (32u - pc.log2n);
+    x[2u * r]      = a[i];
+    x[2u * r + 1u] = 0.0;
+}

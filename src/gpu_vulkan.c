@@ -17,11 +17,15 @@ static const LayoutId pipe_to_layout[PIPE_COUNT] = {
   LAYOUT_2BUF, /* SCALE */
   LAYOUT_2BUF, /* ADDS  */
   LAYOUT_2BUF, /* SUM   */
+  LAYOUT_2BUF, /* FFT_BITREV */
+  LAYOUT_2BUF, /* CMAG       */
+  LAYOUT_1BUF, /* FFT_STAGE  */
 };
 
 /* SPIR-V file basenames (loaded from <shader_dir>/<name>.spv). */
 static const char *pipe_names[PIPE_COUNT] = {
-  "add", "sub", "mul", "div", "scale", "adds", "sum"
+  "add", "sub", "mul", "div", "scale", "adds", "sum",
+  "fft_bitrev", "cmag", "fft_stage"
 };
 
 const char *gpu_pipe_name(PipeId pipe_id) {
@@ -259,8 +263,8 @@ void gpu_init(const char *shader_dir) {
   };
   vkCreateCommandPool(g_ctx.device, &pool_info, NULL, &g_ctx.cmd_pool);
 
-  /* Descriptor Set Layouts: LAYOUT_3BUF has 3 storage buffers, LAYOUT_2BUF has 2 */
-  int buf_counts[LAYOUT_COUNT] = {3, 2};
+  /* Descriptor Set Layouts: 3, 2 and 1 storage buffers respectively */
+  int buf_counts[LAYOUT_COUNT] = {3, 2, 1};
   for (int l = 0; l < LAYOUT_COUNT; l++) {
     VkDescriptorSetLayoutBinding bindings[3];
     for (int i = 0; i < buf_counts[l]; i++) {
@@ -280,7 +284,8 @@ void gpu_init(const char *shader_dir) {
   }
 
   /* Pipeline Layouts (one per descriptor layout, shared push constant range).
-   * 8 bytes is enough for the largest push block: { uint n; float scalar; }. */
+   * Every push block so far is 8 bytes ({ uint n; float scalar; },
+   * { uint n; uint h; }, ...); 16 leaves headroom for the next one. */
   VkPushConstantRange push_range = {
     .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
     .offset = 0,

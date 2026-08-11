@@ -80,10 +80,11 @@ GPU behavior is environment-specific, so please include:
 ## Scope (current)
 
 `v0.1.0` is the **L1 foundation**: FP32, 1-D `GPU::SFloat`, element-wise and
-scalar arithmetic, and `sum` / `mean`. Work in progress: N-dimensional (2-D)
-support, FFT, and a kernel DSL. Dense linear algebra (GEMM / SVD) is
-intentionally **out of scope on Vulkan** (see the README roadmap for why). If
-you're unsure whether a change fits, please open an issue first.
+scalar arithmetic, `sum` / `mean`, and a radix-2 `#rfft` with its spectral
+helpers. Work in progress: N-dimensional (2-D) support, an inverse transform,
+and a kernel DSL. Dense linear algebra (GEMM / SVD) is intentionally **out of
+scope on Vulkan** (see the README roadmap for why). If you're unsure whether a
+change fits, please open an issue first.
 
 ## License
 

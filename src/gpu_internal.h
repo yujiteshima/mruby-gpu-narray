@@ -21,17 +21,22 @@
 /* ---- Pipeline / Layout enums ----
  *
  * 3BUF pipelines take (a, b, c): element-wise binary ops.
- * 2BUF pipelines take (a, b):    scalar ops and reduction.
+ * 2BUF pipelines take (a, b):    scalar ops, reduction, and the FFT's
+ *                                real->complex and complex->real passes.
+ * 1BUF pipelines take (a):       the in-place FFT butterfly pass.
  */
 typedef enum {
   PIPE_ADD = 0, PIPE_SUB, PIPE_MUL, PIPE_DIV,  /* 3BUF: c = a (op) b   */
   PIPE_SCALE,                                  /* 2BUF: b = a * scalar */
   PIPE_ADDS,                                   /* 2BUF: b = a + scalar */
   PIPE_SUM,                                    /* 2BUF: partial sums   */
+  PIPE_FFT_BITREV,                             /* 2BUF: real -> bit-reversed complex */
+  PIPE_CMAG,                                   /* 2BUF: complex -> magnitude / power */
+  PIPE_FFT_STAGE,                              /* 1BUF: in-place butterfly pass */
   PIPE_COUNT
 } PipeId;
 
-typedef enum { LAYOUT_3BUF = 0, LAYOUT_2BUF, LAYOUT_COUNT } LayoutId;
+typedef enum { LAYOUT_3BUF = 0, LAYOUT_2BUF, LAYOUT_1BUF, LAYOUT_COUNT } LayoutId;
 
 /* ---- GPU Context (singleton) ---- */
 typedef struct {
