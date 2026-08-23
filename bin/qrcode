@@ -1,0 +1,54 @@
+#!/usr/bin/env ruby
+require "optparse"
+require_relative "../lib/qr_code_generator"
+
+options = { module_size: 10 }
+
+parser = OptionParser.new do |opts|
+  opts.banner = <<~BANNER
+    QR コード生成ツール
+
+    使い方: bin/qrcode [オプション]
+
+    例:
+      bin/qrcode --text "スターください" -o star.png
+      bin/qrcode --url "https://github.com/yujiteshima" -o profile.svg
+      bin/qrcode --url "https://github.com/yujiteshima/qrcode-generator" --text "スターください" -o star_repo.png
+      bin/qrcode --text "スターください"          # ファイル指定なしでターミナルに表示
+  BANNER
+
+  opts.on("-t", "--text TEXT", "QR コードに埋め込む文字列") { |v| options[:text] = v }
+  opts.on("-u", "--url URL", "QR コードに埋め込む URL") { |v| options[:url] = v }
+  opts.on("-o", "--output FILE", "出力ファイル (.png / .svg)。省略時はターミナルに表示") { |v| options[:output] = v }
+  opts.on("-s", "--size N", Integer, "PNG/SVG の 1 モジュールあたりのピクセル数 (既定: 10)") { |v| options[:module_size] = v }
+  opts.on("-h", "--help", "このヘルプを表示") do
+    puts opts
+    exit
+  end
+end
+
+begin
+  parser.parse!
+
+  payload = QRCodeGenerator.build_payload(url: options[:url], text: options[:text])
+  qr = QRCodeGenerator.generate(payload)
+
+  if options[:output]
+    QRCodeGenerator.write(qr, options[:output], module_size: options[:module_size])
+    puts "QR コードを保存しました: #{options[:output]}"
+    puts "埋め込んだデータ:"
+    puts payload.gsub(/^/, "  ")
+  else
+    puts qr.as_ansi
+    puts "埋め込んだデータ:"
+    puts payload.gsub(/^/, "  ")
+  end
+rescue QRCodeGenerator::Error => e
+  warn "エラー: #{e.message}"
+  warn "使い方は bin/qrcode --help を参照してください"
+  exit 1
+rescue OptionParser::ParseError => e
+  warn "エラー: #{e.message}"
+  warn parser
+  exit 1
+end
