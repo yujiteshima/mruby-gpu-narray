@@ -38,6 +38,31 @@ class TestQRCodeGenerator < Minitest::Test
     assert_raises(QRCodeGenerator::Error) { QRCodeGenerator.write(qr, "out.txt") }
   end
 
+  def test_svg_document_with_label_renders_visible_text
+    qr = QRCodeGenerator.generate("スターください")
+    svg = QRCodeGenerator.svg_document(qr, label: "スターください")
+    assert_includes svg, ">スターください</text>"
+  end
+
+  def test_svg_document_escapes_label
+    qr = QRCodeGenerator.generate("test")
+    svg = QRCodeGenerator.svg_document(qr, label: "<a & b>")
+    assert_includes svg, "&lt;a &amp; b&gt;"
+  end
+
+  def test_write_png_with_label
+    skip "ImageMagick がないためスキップ" unless QRCodeGenerator.imagemagick_command
+
+    qr = QRCodeGenerator.generate("スターください")
+    Dir.mktmpdir do |dir|
+      plain = File.join(dir, "plain.png")
+      labeled = File.join(dir, "labeled.png")
+      QRCodeGenerator.write(qr, plain)
+      QRCodeGenerator.write(qr, labeled, label: "スターください")
+      assert File.size(labeled) > File.size(plain), "ラベル付き PNG はラベル分だけ大きくなるはず"
+    end
+  end
+
   def test_generated_qr_decodes_back_to_payload
     # QR コードのモジュール行列が生成されることを確認 (デコードは外部ツールで実施)
     qr = QRCodeGenerator.generate("スターください")

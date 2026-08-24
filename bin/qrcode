@@ -2,7 +2,12 @@
 require "optparse"
 require_relative "../lib/qr_code_generator"
 
-options = { module_size: 10 }
+# ロケールが UTF-8 でない環境でも引数を UTF-8 として解釈する
+ARGV.map! do |arg|
+  arg.encoding == Encoding::UTF_8 ? arg : arg.dup.force_encoding(Encoding::UTF_8)
+end
+
+options = { module_size: 10, label: :auto }
 
 parser = OptionParser.new do |opts|
   opts.banner = <<~BANNER
@@ -15,12 +20,18 @@ parser = OptionParser.new do |opts|
       bin/qrcode --url "https://github.com/yujiteshima" -o profile.svg
       bin/qrcode --url "https://github.com/yujiteshima/qrcode-generator" --text "スターください" -o star_repo.png
       bin/qrcode --text "スターください"          # ファイル指定なしでターミナルに表示
+
+    --text を指定して画像出力すると、既定で QR コードの下にその文字列が表示されます
+    (データとしての埋め込みとは別に、目で見える形でも描画されます)。
   BANNER
 
   opts.on("-t", "--text TEXT", "QR コードに埋め込む文字列") { |v| options[:text] = v }
   opts.on("-u", "--url URL", "QR コードに埋め込む URL") { |v| options[:url] = v }
   opts.on("-o", "--output FILE", "出力ファイル (.png / .svg)。省略時はターミナルに表示") { |v| options[:output] = v }
   opts.on("-s", "--size N", Integer, "PNG/SVG の 1 モジュールあたりのピクセル数 (既定: 10)") { |v| options[:module_size] = v }
+  opts.on("-l", "--label TEXT", "画像の下に表示する文字列 (既定: --text の内容)") { |v| options[:label] = v }
+  opts.on("--no-label", "画像下への文字列表示を行わない") { options[:label] = nil }
+  opts.on("--font PATH", "PNG ラベル用フォントファイル (既定: 日本語フォントを自動検出)") { |v| options[:font] = v }
   opts.on("-h", "--help", "このヘルプを表示") do
     puts opts
     exit
@@ -32,15 +43,20 @@ begin
 
   payload = QRCodeGenerator.build_payload(url: options[:url], text: options[:text])
   qr = QRCodeGenerator.generate(payload)
+  label = options[:label] == :auto ? options[:text] : options[:label]
 
   if options[:output]
-    QRCodeGenerator.write(qr, options[:output], module_size: options[:module_size])
+    QRCodeGenerator.write(qr, options[:output],
+                          module_size: options[:module_size],
+                          label: label,
+                          font: options[:font])
     puts "QR コードを保存しました: #{options[:output]}"
-    puts "埋め込んだデータ:"
+    puts "画像内に表示した文字列: #{label}" if label && !label.strip.empty?
+    puts "埋め込んだデータ (スキャンで読み取れる内容):"
     puts payload.gsub(/^/, "  ")
   else
     puts qr.as_ansi
-    puts "埋め込んだデータ:"
+    puts "埋め込んだデータ (スキャンで読み取れる内容):"
     puts payload.gsub(/^/, "  ")
   end
 rescue QRCodeGenerator::Error => e
