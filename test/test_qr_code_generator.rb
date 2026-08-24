@@ -38,10 +38,21 @@ class TestQRCodeGenerator < Minitest::Test
     assert_raises(QRCodeGenerator::Error) { QRCodeGenerator.write(qr, "out.txt") }
   end
 
-  def test_svg_document_with_label_renders_visible_text
+  def test_svg_document_with_center_label_renders_visible_text
     qr = QRCodeGenerator.generate("スターください")
-    svg = QRCodeGenerator.svg_document(qr, label: "スターください")
+    svg = QRCodeGenerator.svg_document(qr, label: "スターください", label_position: :center)
     assert_includes svg, ">スターください</text>"
+    assert_match(/<rect x="\d+" y="\d+"/, svg, "中央の白抜きボックスがあるはず")
+  end
+
+  def test_svg_document_with_bottom_label_extends_height
+    qr = QRCodeGenerator.generate("スターください")
+    plain = QRCodeGenerator.svg_document(qr)
+    svg = QRCodeGenerator.svg_document(qr, label: "スターください", label_position: :bottom)
+    plain_h = plain[/height="(\d+)"/, 1].to_i
+    labeled_h = svg[/height="(\d+)"/, 1].to_i
+    assert_includes svg, ">スターください</text>"
+    assert labeled_h > plain_h, "下部ラベルの分だけ縦に長くなるはず"
   end
 
   def test_svg_document_escapes_label
@@ -50,7 +61,7 @@ class TestQRCodeGenerator < Minitest::Test
     assert_includes svg, "&lt;a &amp; b&gt;"
   end
 
-  def test_write_png_with_label
+  def test_write_png_with_center_label_keeps_dimensions
     skip "ImageMagick がないためスキップ" unless QRCodeGenerator.imagemagick_command
 
     qr = QRCodeGenerator.generate("スターください")
@@ -58,8 +69,24 @@ class TestQRCodeGenerator < Minitest::Test
       plain = File.join(dir, "plain.png")
       labeled = File.join(dir, "labeled.png")
       QRCodeGenerator.write(qr, plain)
-      QRCodeGenerator.write(qr, labeled, label: "スターください")
-      assert File.size(labeled) > File.size(plain), "ラベル付き PNG はラベル分だけ大きくなるはず"
+      QRCodeGenerator.write(qr, labeled, label: "スターください", label_position: :center)
+      assert_equal ChunkyPNG::Image.from_file(plain).height,
+                   ChunkyPNG::Image.from_file(labeled).height,
+                   "中央ラベルは重ね描きなので画像サイズは変わらないはず"
+    end
+  end
+
+  def test_write_png_with_bottom_label_extends_height
+    skip "ImageMagick がないためスキップ" unless QRCodeGenerator.imagemagick_command
+
+    qr = QRCodeGenerator.generate("スターください")
+    Dir.mktmpdir do |dir|
+      plain = File.join(dir, "plain.png")
+      labeled = File.join(dir, "labeled.png")
+      QRCodeGenerator.write(qr, plain)
+      QRCodeGenerator.write(qr, labeled, label: "スターください", label_position: :bottom)
+      assert ChunkyPNG::Image.from_file(labeled).height > ChunkyPNG::Image.from_file(plain).height,
+             "下部ラベルの分だけ縦に長くなるはず"
     end
   end
 

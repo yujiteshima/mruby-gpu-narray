@@ -7,7 +7,7 @@ ARGV.map! do |arg|
   arg.encoding == Encoding::UTF_8 ? arg : arg.dup.force_encoding(Encoding::UTF_8)
 end
 
-options = { module_size: 10, label: :auto }
+options = { module_size: 10, label: :auto, label_position: :center }
 
 parser = OptionParser.new do |opts|
   opts.banner = <<~BANNER
@@ -29,8 +29,12 @@ parser = OptionParser.new do |opts|
   opts.on("-u", "--url URL", "QR コードに埋め込む URL") { |v| options[:url] = v }
   opts.on("-o", "--output FILE", "出力ファイル (.png / .svg)。省略時はターミナルに表示") { |v| options[:output] = v }
   opts.on("-s", "--size N", Integer, "PNG/SVG の 1 モジュールあたりのピクセル数 (既定: 10)") { |v| options[:module_size] = v }
-  opts.on("-l", "--label TEXT", "画像の下に表示する文字列 (既定: --text の内容)") { |v| options[:label] = v }
-  opts.on("--no-label", "画像下への文字列表示を行わない") { options[:label] = nil }
+  opts.on("-l", "--label TEXT", "画像に表示する文字列 (既定: --text の内容)") { |v| options[:label] = v }
+  opts.on("--no-label", "画像への文字列表示を行わない") { options[:label] = nil }
+  opts.on("-p", "--label-pos POS", %w[center bottom],
+          "文字列の表示位置: center = QR コード中央に重ねる (既定) / bottom = 画像下部") do |v|
+    options[:label_position] = v.to_sym
+  end
   opts.on("--font PATH", "PNG ラベル用フォントファイル (既定: 日本語フォントを自動検出)") { |v| options[:font] = v }
   opts.on("-h", "--help", "このヘルプを表示") do
     puts opts
@@ -49,9 +53,13 @@ begin
     QRCodeGenerator.write(qr, options[:output],
                           module_size: options[:module_size],
                           label: label,
+                          label_position: options[:label_position],
                           font: options[:font])
     puts "QR コードを保存しました: #{options[:output]}"
-    puts "画像内に表示した文字列: #{label}" if label && !label.strip.empty?
+    if label && !label.strip.empty?
+      pos = options[:label_position] == :center ? "QR コード中央" : "画像下部"
+      puts "画像内に表示した文字列 (#{pos}): #{label}"
+    end
     puts "埋め込んだデータ (スキャンで読み取れる内容):"
     puts payload.gsub(/^/, "  ")
   else
