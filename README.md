@@ -75,15 +75,21 @@ bin/qrcode --text "スターください"
 
 - `examples/star_kudasai.png` —「スターください」を埋め込んだ QR コード（中央にも文字列を表示）
 - `examples/star_kudasai.svg` — 同上の SVG 版
-- `examples/star_with_url.png` —「スターください」+ URL を埋め込んだ QR コード
+- `examples/star_with_url.png` —「スターください」+ URL を埋め込んだ QR コード（スキャン結果はテキスト扱い）
+- `examples/star_link_only.png` — データは URL のみで、中央の表示だけ「スターください」
+  （スキャンするとすぐリンクを開ける。スター依頼にはこちらがおすすめ）
 
 再生成する場合:
 
 ```sh
 bin/qrcode --text "スターください" -o examples/star_kudasai.png
 bin/qrcode --text "スターください" -o examples/star_kudasai.svg
-bin/qrcode --text "スターください" --url "https://github.com/yujiteshima/qrcode-generator" -o examples/star_with_url.png
+bin/qrcode --text "スターください" --url "https://github.com/yujiteshima/mruby-gpu-narray" -o examples/star_with_url.png
+bin/qrcode --url "https://github.com/yujiteshima/mruby-gpu-narray" --label "スターください" -o examples/star_link_only.png
 ```
+
+> URL には実在するページを指定してください。存在しない URL を埋め込むと、
+> QR コードは正しく読み取れてもアクセス時に 404 になります。
 
 ## ライブラリとして使う
 
