@@ -191,6 +191,64 @@ else
   puts "SKIP array past one dispatch (device allows #{max_elems} elements per dispatch)"
 end
 
+def assert_true(label, cond, detail = "false")
+  cond ? ok(label) : ng(label, detail)
+end
+
+# ---- deferred submission ----
+#
+# Dispatches are recorded and submitted together when a result is read.
+# These check the batching itself, the sync points, and the two things that
+# could silently go wrong: a host write racing a queued read, and a buffer
+# freed by the GC while a queued dispatch still references it.
+
+GPU.sync_mode = :deferred
+GPU.sync   # earlier tests may have left work queued; start the count from zero
+assert_true("default sync mode is :deferred", GPU.sync_mode == :deferred, GPU.sync_mode.inspect)
+
+dv = GPU::SFloat.new(1024).seq
+chain = dv * 2 + 1 - 3 + 4
+assert_true("four operators are recorded, not submitted", GPU.pending == 4, "pending = #{GPU.pending}")
+assert_ary("deferred chain reads back correctly",
+           [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0], chain.head(8))
+assert_true("reading a result flushes the batch", GPU.pending == 0, "pending = #{GPU.pending}")
+
+dr = dv * 2
+dv.fill(0.0)          # host write to the input of a queued dispatch
+assert_ary("a host write flushes the queued reader first", [0.0, 2.0, 4.0, 6.0], dr.head(4))
+dv.seq
+
+fresh = GPU::SFloat.new(4)
+dv * 3                # queued
+fresh.fill(1.0)       # a buffer the batch never touched must not force a flush
+assert_true("writing an untouched buffer keeps the batch pending", GPU.pending == 1, "pending = #{GPU.pending}")
+GPU.sync
+
+long = dv
+300.times { long = long * 1.0 }   # more dispatches than the descriptor pool holds
+assert_ary("a batch longer than the descriptor pool still runs", [0.0, 1.0, 2.0, 3.0], long.head(4))
+
+gy = nil
+40.times { gy = (dv + 1) * 2 - 2 }   # (dv + 1) and its double are garbage on the next iteration
+GC.start
+assert_ary("garbage intermediates outlive the batch that reads them", [0.0, 2.0, 4.0, 6.0], gy.head(4))
+
+ds = GPU::SFloat.cast([1.0, 2.0, 3.0, 4.0])
+assert_near("sum flushes and reads the partials", 20.0, (ds * 2).sum)
+
+dsig = GPU::SFloat.new(16).seq
+spec_deferred = dsig.power_spectrum.to_a
+GPU.sync_mode = :eager
+spec_eager = dsig.power_spectrum.to_a
+assert_ary("rfft agrees between deferred and eager", spec_eager, spec_deferred)
+dsig * 2
+assert_true("eager mode submits every dispatch", GPU.pending == 0, "pending = #{GPU.pending}")
+assert_true("sync_mode reports :eager", GPU.sync_mode == :eager, GPU.sync_mode.inspect)
+GPU.sync_mode = :deferred
+GPU.sync
+assert_true("GPU.sync with nothing pending is a no-op", GPU.pending == 0)
+assert_raise("unknown sync mode -> ArgumentError", ArgumentError) { GPU.sync_mode = :later }
+
 # ---- summary ----
 puts
 puts "#{$pass + $fail} tests, #{$pass} passed, #{$fail} failed"

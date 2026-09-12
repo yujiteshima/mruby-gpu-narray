@@ -132,7 +132,8 @@ GPU::SFloat (mruby)                         mrblib/gpu_narray.rb  (shape, mean, 
    ▼
 src/gpu_narray.c    dtype methods; picks a pipeline; keeps results on the GPU
    ▼
-src/gpu_vulkan.c    dispatch_compute(): descriptor set → command buffer → submit → fence
+src/gpu_vulkan.c    dispatch_pipeline(): descriptor set → recorded into one command buffer, + barrier
+                    gpu_flush():         submit → fence, once per batch, when a result is read
    ▼
 shader/*.comp       add / sub / mul / div / scale / adds / sum
                     fft_bitrev / fft_stage / cmag            (GLSL → SPIR-V)
@@ -150,9 +151,54 @@ buffer of `2n` floats (interleaved re/im, wrapped as `GPU::SComplex`):
    order, so the butterflies afterwards run in natural order and in place.
 2. `fft_stage` runs once per pass with a doubling half-size `h = 1, 2, … n/2`. Each
    invocation owns one butterfly, and a pass's pairs partition `[0, n)` exactly — so
-   the in-place writes don't race, and one dispatch per pass is the barrier between
-   passes.
+   the in-place writes don't race, and the memory barrier recorded after each pass
+   orders it before the next.
 3. `cmag` reduces the spectrum to a real `GPU::SFloat` of magnitudes or powers.
+
+### Deferred submission
+
+A dispatch is not a round trip. Every operation is *recorded* into one long-lived
+command buffer, followed by a memory barrier so the next dispatch sees its writes,
+and nothing is submitted until the host actually needs a result. Then everything
+recorded so far goes to the GPU in one `vkQueueSubmit`, with one fence wait.
+
+```ruby
+b = a * 2 + 1 - 3 + 4     # four dispatches recorded, nothing submitted
+GPU.pending               #=> 4
+b.to_a                    # one submit, one wait, then the copy
+GPU.pending               #=> 0
+```
+
+The sync points, where the batch is flushed:
+
+- reading a result (`to_a`, `head`, `sum`, `mean`, `inspect`, …);
+- a host write (`seq`, `fill`) to a buffer that a queued dispatch reads or writes —
+  a buffer the batch never touched is written at once;
+- the descriptor pool running dry (256 dispatches), which just flushes early;
+- `GPU.sync`, explicitly — useful when timing a batch;
+- shutdown.
+
+A buffer whose Ruby object is collected while a queued dispatch still references it
+is kept until that batch has run, then freed. `rfft` benefits without changes: its
+`1 + log2(n)` passes are one submit.
+
+`GPU.sync_mode = :eager` restores a submit and a wait after every dispatch — the
+behaviour this library had before batching, kept so the two can be measured
+against each other (`GPU.sync_mode` reads it back; the default is `:deferred`).
+
+| Apple M5, 100-run mean | `a * 2 + 1 - 3 + 4` (4 dispatches) | `power_spectrum` |
+|---|---|---|
+| 1,024 elements, eager (4 / 12 waits) | 0.95 ms | 2.69 ms |
+| 1,024 elements, deferred (1 wait) | 0.25 ms | 0.29 ms |
+| 1,048,576 elements, eager | 2.33 ms | 7.13 ms |
+| 1,048,576 elements, deferred | 2.12 ms | 2.74 ms |
+
+At 1M elements the four passes over memory dominate, and batching alone cannot
+remove those — that is what fusing the expression into one shader is for
+([mruby-gpu-kernel](https://github.com/yujiteshima/mruby-gpu-kernel): 0.35 ms).
+
+Add-on gems can put their own pipelines into the same batch through
+`dispatch_pipeline()` in `src/gpu_internal.h`.
 
 ### Limits and failures
 

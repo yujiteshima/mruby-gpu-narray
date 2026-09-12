@@ -9,6 +9,14 @@
  * Callers wrap as soon as create_buffer returns, before anything that can
  * raise, so a Vulkan failure unwinds without stranding GPU memory.
  * destroy_buffer is the finalizer itself, plus create_buffer's own unwind.
+ *
+ * With deferred submission a buffer can be referenced by a command buffer that
+ * has not run yet. Two rules keep that safe:
+ *   - map_buffer flushes the batch first if it touches this buffer, so the
+ *     host never reads a result that is still queued, and never overwrites an
+ *     input that a queued dispatch has yet to read.
+ *   - destroy_buffer parks such a buffer in the graveyard instead of freeing
+ *     it; gpu_flush frees the graveyard once the batch has completed.
  */
 #include "gpu_internal.h"
 
@@ -30,6 +38,7 @@ GpuBuffer *create_buffer(mrb_state *mrb, uint32_t n) {
   buf->buffer = VK_NULL_HANDLE;
   buf->memory = VK_NULL_HANDLE;
   buf->bytes = sizeof(float) * (VkDeviceSize)n;
+  buf->epoch = 0;   /* never bound; no batch can be waiting on it */
   if (buf->bytes == 0) buf->bytes = sizeof(float); /* avoid zero-size allocation */
 
   VkBufferCreateInfo bi = {
@@ -93,10 +102,30 @@ GpuBuffer *create_buffer(mrb_state *mrb, uint32_t n) {
   return buf;
 }
 
-/* ---- Free a buffer's GPU resources + the struct itself ---- */
+/* ---- Free a buffer's GPU resources + the struct itself ----
+ *
+ * Runs as the GC finalizer, so it must not raise and must not block: a buffer
+ * the pending batch still references is parked in the graveyard and freed by
+ * the next gpu_flush, after the GPU is done with it. */
 void destroy_buffer(mrb_state *mrb, GpuBuffer *buf) {
   if (!buf) return;
   if (g_ctx.initialized) {
+    if (g_ctx.batch_recording && buf->epoch == g_ctx.epoch) {
+      if (g_ctx.graveyard_len == g_ctx.graveyard_cap) {
+        size_t cap = g_ctx.graveyard_cap ? g_ctx.graveyard_cap * 2 : 64;
+        GpuBuffer **g = realloc(g_ctx.graveyard, cap * sizeof(GpuBuffer *));
+        if (!g) {
+          /* Cannot park it and must not free it under the GPU's feet. Leaking
+           * one buffer is the least bad outcome inside a finalizer. */
+          fprintf(stderr, "mruby-gpu-narray: out of memory deferring a buffer free; leaking it\n");
+          return;
+        }
+        g_ctx.graveyard = g;
+        g_ctx.graveyard_cap = cap;
+      }
+      g_ctx.graveyard[g_ctx.graveyard_len++] = buf;
+      return;
+    }
     vkDestroyBuffer(g_ctx.device, buf->buffer, NULL);
     vkFreeMemory(g_ctx.device, buf->memory, NULL);
   }
@@ -112,8 +141,13 @@ mrb_value wrap_buffer(mrb_state *mrb, struct RClass *klass, GpuBuffer *buf) {
 /* ---- Host mapping helpers (coherent memory, no flush needed) ----
  *
  * Never returns NULL: every caller writes through the pointer immediately, so
- * an unreported map failure would be a NULL dereference inside the VM. */
+ * an unreported map failure would be a NULL dereference inside the VM.
+ *
+ * This is the sync point of the whole library: the host is about to look at
+ * (or change) the bytes, so any queued dispatch that reads or writes this
+ * buffer has to run first. A buffer the batch never touched maps at once. */
 float *map_buffer(mrb_state *mrb, GpuBuffer *buf) {
+  gpu_sync_buffer(mrb, buf);
   float *mapped = NULL;
   VK_CHECK(mrb, vkMapMemory(g_ctx.device, buf->memory, 0, buf->bytes, 0, (void **)&mapped));
   if (!mapped) {

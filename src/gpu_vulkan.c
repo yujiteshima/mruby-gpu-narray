@@ -125,15 +125,69 @@ static uint8_t *load_spv(const char *path, size_t *size) {
   return buf;
 }
 
-/* ---- Generic Compute Dispatch ---- */
-void dispatch_compute(
-    mrb_state *mrb, PipeId pipe_id,
-    VkBuffer *buffers, VkDeviceSize *sizes, int num_buffers,
+/* ---- Deferred submission ----
+ *
+ * A dispatch is no longer a round trip. It is recorded into one long-lived
+ * command buffer, followed by a memory barrier so the next dispatch sees its
+ * writes, and nothing is submitted until the host actually needs a result:
+ * a host read or write of a buffer the batch touches (map_buffer), a
+ * descriptor pool that has run dry, an explicit GPU.sync, or shutdown. Then
+ * gpu_flush ends the command buffer, submits it once, waits once, and resets
+ * the pool for the next batch.
+ *
+ * `a * 2 + 1 - 3 + 4` therefore costs four dispatches and one wait instead of
+ * four waits; an FFT's log2(n) passes cost one wait instead of log2(n).
+ * GPU.sync_mode = :eager flushes after every dispatch -- the pre-batching
+ * behaviour, kept so the two can be measured against each other.
+ *
+ * A buffer remembers the epoch (batch number) it was last bound in. That is
+ * how map_buffer knows whether a flush is due, and how the GC finalizer knows
+ * a buffer must outlive its Ruby owner until the batch has run. */
+
+static void batch_begin(mrb_state *mrb) {
+  if (g_ctx.batch_recording) return;
+  VkCommandBufferBeginInfo begin = {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+  };
+  /* The pool was created with RESET_COMMAND_BUFFER_BIT, so beginning a
+   * command buffer that has already been submitted resets it implicitly. */
+  VK_CHECK(mrb, vkBeginCommandBuffer(g_ctx.batch_cmd, &begin));
+  g_ctx.batch_recording = 1;
+}
+
+/* One descriptor set from the pool. A full pool just means the batch is
+ * flushed a little early: the sets it held are released by the reset. */
+static VkDescriptorSet alloc_desc_set(mrb_state *mrb, LayoutId lid) {
+  if (g_ctx.batch_sets >= GPU_MAX_DESC_SETS) gpu_flush(mrb);
+  VkDescriptorSetAllocateInfo dsai = {
+    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+    .descriptorPool = g_ctx.desc_pool,
+    .descriptorSetCount = 1,
+    .pSetLayouts = &g_ctx.desc_layouts[lid]
+  };
+  VkDescriptorSet set = VK_NULL_HANDLE;
+  VkResult r = vkAllocateDescriptorSets(g_ctx.device, &dsai, &set);
+  if (r == VK_ERROR_FRAGMENTED_POOL
+#ifdef VK_ERROR_OUT_OF_POOL_MEMORY
+      || r == VK_ERROR_OUT_OF_POOL_MEMORY
+#endif
+  ) {
+    /* Our count and the driver's disagree; a flush resets the pool either way. */
+    gpu_flush(mrb);
+    r = vkAllocateDescriptorSets(g_ctx.device, &dsai, &set);
+  }
+  gpu_check(mrb, r, "vkAllocateDescriptorSets");
+  g_ctx.batch_sets++;
+  return set;
+}
+
+void dispatch_pipeline(
+    mrb_state *mrb, VkPipeline pipeline, LayoutId lid,
+    GpuBuffer **bufs, int num_buffers,
     const void *push_data, uint32_t push_size,
     uint32_t group_x, uint32_t group_y, uint32_t group_z)
 {
-  LayoutId lid = pipe_to_layout[pipe_id];
-
   /* Exceeding maxComputeWorkGroupCount is invalid usage, and what happens is
    * up to the driver: lavapipe runs the dispatch anyway and returns the right
    * answer, so the limit is easy to miss in testing, while a driver bounded by
@@ -148,22 +202,19 @@ void dispatch_compute(
       (mrb_int)group_x, (mrb_int)g_ctx.max_workgroups,
       (mrb_int)g_ctx.max_workgroups * 256);
   }
+  if (pipeline == VK_NULL_HANDLE) {
+    mrb_raise(mrb, E_RUNTIME_ERROR, "dispatch of a pipeline that was never created");
+  }
+  if (num_buffers < 1 || num_buffers > 3) {
+    mrb_raisef(mrb, E_ARGUMENT_ERROR, "dispatch takes 1..3 buffers, got %d", num_buffers);
+  }
 
-  /* Allocate descriptor set */
-  VkDescriptorSetAllocateInfo dsai = {
-    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-    .descriptorPool = g_ctx.desc_pool,
-    .descriptorSetCount = 1,
-    .pSetLayouts = &g_ctx.desc_layouts[lid]
-  };
-  VkDescriptorSet desc_set;
-  VK_CHECK(mrb, vkAllocateDescriptorSets(g_ctx.device, &dsai, &desc_set));
+  VkDescriptorSet desc_set = alloc_desc_set(mrb, lid);
 
-  /* Update descriptor set */
   VkDescriptorBufferInfo buf_infos[3];
   VkWriteDescriptorSet writes[3];
   for (int i = 0; i < num_buffers; i++) {
-    buf_infos[i] = (VkDescriptorBufferInfo){buffers[i], 0, sizes[i]};
+    buf_infos[i] = (VkDescriptorBufferInfo){bufs[i]->buffer, 0, bufs[i]->bytes};
     writes[i] = (VkWriteDescriptorSet){
       .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
       .dstSet = desc_set,
@@ -175,69 +226,102 @@ void dispatch_compute(
   }
   vkUpdateDescriptorSets(g_ctx.device, num_buffers, writes, 0, NULL);
 
-  /* Command buffer */
-  VkCommandBufferAllocateInfo cbai = {
-    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-    .commandPool = g_ctx.cmd_pool,
-    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-    .commandBufferCount = 1
-  };
-  VkCommandBuffer cmd;
-  VkResult r = vkAllocateCommandBuffers(g_ctx.device, &cbai, &cmd);
-  if (r != VK_SUCCESS) {
-    vkFreeDescriptorSets(g_ctx.device, g_ctx.desc_pool, 1, &desc_set);
-    gpu_check(mrb, r, "vkAllocateCommandBuffers");
+  batch_begin(mrb);
+  VkCommandBuffer cmd = g_ctx.batch_cmd;
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+    g_ctx.pipe_layouts[lid], 0, 1, &desc_set, 0, NULL);
+  if (push_size > 0) {
+    vkCmdPushConstants(cmd, g_ctx.pipe_layouts[lid], VK_SHADER_STAGE_COMPUTE_BIT,
+      0, push_size, push_data);
   }
+  vkCmdDispatch(cmd, group_x, group_y, group_z);
 
-  /* Record, submit and wait. Everything from here shares one exit path so the
-   * fence, command buffer and descriptor set are released whatever fails --
-   * gpu_check below raises, and a raise unwinds past any cleanup after it. */
-  VkCommandBufferBeginInfo begin = {
-    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+  /* Make this dispatch's writes visible to whatever is recorded next. One
+   * global barrier per dispatch is coarser than tracking buffers one by one,
+   * but it costs nothing next to the submit + fence wait it replaces. */
+  VkMemoryBarrier barrier = {
+    .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+    .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+    .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
   };
-  VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  VkSubmitInfo si = {
-    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-    .commandBufferCount = 1,
-    .pCommandBuffers = &cmd
-  };
-  VkFence fence = VK_NULL_HANDLE;
-  const char *step = "vkBeginCommandBuffer";
+  vkCmdPipelineBarrier(cmd,
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    0, 1, &barrier, 0, NULL, 0, NULL);
 
-  r = vkBeginCommandBuffer(cmd, &begin);
-  if (r == VK_SUCCESS) {
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ctx.pipelines[pipe_id]);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-      g_ctx.pipe_layouts[lid], 0, 1, &desc_set, 0, NULL);
-    if (push_size > 0) {
-      vkCmdPushConstants(cmd, g_ctx.pipe_layouts[lid], VK_SHADER_STAGE_COMPUTE_BIT,
-        0, push_size, push_data);
-    }
-    vkCmdDispatch(cmd, group_x, group_y, group_z);
+  for (int i = 0; i < num_buffers; i++) bufs[i]->epoch = g_ctx.epoch;
+  g_ctx.batch_dispatches++;
+
+  if (g_ctx.eager) gpu_flush(mrb);
+}
+
+void dispatch_compute(
+    mrb_state *mrb, PipeId pipe_id,
+    GpuBuffer **bufs, int num_buffers,
+    const void *push_data, uint32_t push_size,
+    uint32_t group_x, uint32_t group_y, uint32_t group_z)
+{
+  dispatch_pipeline(mrb, g_ctx.pipelines[pipe_id], pipe_to_layout[pipe_id],
+                    bufs, num_buffers, push_data, push_size,
+                    group_x, group_y, group_z);
+}
+
+/* Free what the GC could not: buffers whose owners died while a batch still
+ * referenced them. Only called once no work is pending. */
+static void bury_graveyard(mrb_state *mrb) {
+  for (size_t i = 0; i < g_ctx.graveyard_len; i++) {
+    GpuBuffer *b = g_ctx.graveyard[i];
+    vkDestroyBuffer(g_ctx.device, b->buffer, NULL);
+    vkFreeMemory(g_ctx.device, b->memory, NULL);
+    mrb_free(mrb, b);
+  }
+  g_ctx.graveyard_len = 0;
+}
+
+void gpu_flush(mrb_state *mrb) {
+  if (!g_ctx.initialized) return;
+  VkResult r = VK_SUCCESS;
+  const char *step = NULL;
+
+  if (g_ctx.batch_recording) {
     step = "vkEndCommandBuffer";
-    r = vkEndCommandBuffer(cmd);
-  }
-  if (r == VK_SUCCESS) {
-    step = "vkCreateFence";
-    r = vkCreateFence(g_ctx.device, &fi, NULL, &fence);
-  }
-  if (r == VK_SUCCESS) {
-    step = "vkQueueSubmit";
-    r = vkQueueSubmit(g_ctx.queue, 1, &si, fence);
-  }
-  if (r == VK_SUCCESS) {
-    /* Without this check a lost device returns immediately and the caller
-     * reads whatever is in the buffer as a valid result. */
-    step = "vkWaitForFences";
-    r = vkWaitForFences(g_ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    r = vkEndCommandBuffer(g_ctx.batch_cmd);
+    if (r == VK_SUCCESS) {
+      VkSubmitInfo si = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &g_ctx.batch_cmd
+      };
+      step = "vkQueueSubmit";
+      r = vkQueueSubmit(g_ctx.queue, 1, &si, g_ctx.batch_fence);
+    }
+    if (r == VK_SUCCESS) {
+      /* Without this check a lost device returns immediately and the caller
+       * reads whatever is in the buffer as a valid result. */
+      step = "vkWaitForFences";
+      r = vkWaitForFences(g_ctx.device, 1, &g_ctx.batch_fence, VK_TRUE, UINT64_MAX);
+      if (r == VK_SUCCESS) vkResetFences(g_ctx.device, 1, &g_ctx.batch_fence);
+    }
+    /* Whatever happened, this command buffer is spent; the next batch_begin
+     * resets it. */
+    g_ctx.batch_recording = 0;
   }
 
-  if (fence != VK_NULL_HANDLE) vkDestroyFence(g_ctx.device, fence, NULL);
-  vkFreeCommandBuffers(g_ctx.device, g_ctx.cmd_pool, 1, &cmd);
-  vkFreeDescriptorSets(g_ctx.device, g_ctx.desc_pool, 1, &desc_set);
+  /* No work is pending from here on (either it completed or it never left
+   * the host), so the sets and the graveyard can go. */
+  g_ctx.batch_dispatches = 0;
+  if (g_ctx.batch_sets > 0) {
+    vkResetDescriptorPool(g_ctx.device, g_ctx.desc_pool, 0);
+    g_ctx.batch_sets = 0;
+  }
+  g_ctx.epoch++;
+  bury_graveyard(mrb);
 
-  gpu_check(mrb, r, step);
+  if (step) gpu_check(mrb, r, step);
+}
+
+void gpu_sync_buffer(mrb_state *mrb, GpuBuffer *buf) {
+  if (g_ctx.batch_recording && buf->epoch == g_ctx.epoch) gpu_flush(mrb);
 }
 
 /* ---- Init ---- */
@@ -364,6 +448,22 @@ void gpu_init(mrb_state *mrb, const char *shader_dir) {
   };
   VK_CHECK(mrb, vkCreateCommandPool(g_ctx.device, &pool_info, NULL, &g_ctx.cmd_pool));
 
+  /* The one command buffer every dispatch is recorded into, and the fence
+   * each flush waits on. Both live as long as the context. */
+  VkCommandBufferAllocateInfo cbai = {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+    .commandPool = g_ctx.cmd_pool,
+    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    .commandBufferCount = 1
+  };
+  VK_CHECK(mrb, vkAllocateCommandBuffers(g_ctx.device, &cbai, &g_ctx.batch_cmd));
+  VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  VK_CHECK(mrb, vkCreateFence(g_ctx.device, &fi, NULL, &g_ctx.batch_fence));
+  g_ctx.batch_recording = 0;
+  g_ctx.batch_dispatches = 0;
+  g_ctx.batch_sets = 0;
+  g_ctx.epoch = 1;   /* a fresh buffer carries epoch 0, which never matches */
+
   /* Descriptor Set Layouts: 3, 2 and 1 storage buffers respectively */
   int buf_counts[LAYOUT_COUNT] = {3, 2, 1};
   for (int l = 0; l < LAYOUT_COUNT; l++) {
@@ -464,12 +564,12 @@ void gpu_init(mrb_state *mrb, const char *shader_dir) {
   /* Descriptor Pool */
   VkDescriptorPoolSize pool_size = {
     .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-    .descriptorCount = 768
+    .descriptorCount = 3 * GPU_MAX_DESC_SETS
   };
   VkDescriptorPoolCreateInfo dp_info = {
     .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
     .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-    .maxSets = 256,
+    .maxSets = GPU_MAX_DESC_SETS,
     .poolSizeCount = 1,
     .pPoolSizes = &pool_size
   };

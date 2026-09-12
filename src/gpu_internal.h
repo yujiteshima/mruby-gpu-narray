@@ -48,6 +48,21 @@ typedef enum {
   PIPE_CREATE_FAILED  /* the driver rejected it; see pipe_error[]    */
 } PipeState;
 
+/* ---- GPU Buffer (FP32, 1-D) ---- */
+typedef struct {
+  VkBuffer buffer;
+  VkDeviceMemory memory;
+  uint32_t n;          /* element count */
+  VkDeviceSize bytes;  /* n * sizeof(float) */
+  uint32_t epoch;      /* batch this buffer was last bound in (0 = never); see dispatch_pipeline */
+} GpuBuffer;
+
+extern const struct mrb_data_type gpu_buffer_type;
+
+/* Descriptor sets the pool holds. A batch that needs more is flushed early,
+ * which is just an earlier sync point, not an error. */
+#define GPU_MAX_DESC_SETS 256
+
 /* ---- GPU Context (singleton) ---- */
 typedef struct {
   VkInstance instance;
@@ -65,19 +80,24 @@ typedef struct {
   uint32_t max_workgroups;  /* maxComputeWorkGroupCount[0] */
   int initialized;
   int init_failed;          /* a previous gpu_init raised; do not retry */
+
+  /* ---- Deferred submission (see dispatch_pipeline / gpu_flush) ----
+   *
+   * Dispatches are recorded into one long-lived command buffer and submitted
+   * together the first time the host needs a result. */
+  VkCommandBuffer batch_cmd;     /* allocated at init, reset by every begin */
+  VkFence         batch_fence;   /* reused across flushes */
+  int      batch_recording;      /* batch_cmd is between vkBegin and vkEnd */
+  uint32_t batch_dispatches;     /* recorded since the last flush (GPU.pending) */
+  uint32_t batch_sets;           /* descriptor sets taken since the last pool reset */
+  uint32_t epoch;                /* batch number; bumped by every flush, never 0 */
+  int      eager;                /* GPU.sync_mode = :eager -> flush after every dispatch */
+  GpuBuffer **graveyard;         /* buffers whose Ruby owner died while a batch still referenced them */
+  size_t graveyard_len;
+  size_t graveyard_cap;
 } GpuCtx;
 
 extern GpuCtx g_ctx;
-
-/* ---- GPU Buffer (FP32, 1-D) ---- */
-typedef struct {
-  VkBuffer buffer;
-  VkDeviceMemory memory;
-  uint32_t n;          /* element count */
-  VkDeviceSize bytes;  /* n * sizeof(float) */
-} GpuBuffer;
-
-extern const struct mrb_data_type gpu_buffer_type;
 
 /* ---- Error handling ----
  *
@@ -95,10 +115,31 @@ const char *gpu_result_name(VkResult r);
 /* ---- gpu_vulkan.c ---- */
 void gpu_init(mrb_state *mrb, const char *shader_dir);
 const char *gpu_pipe_name(PipeId pipe_id);
+
+/* Record one compute dispatch of `pipeline` (created against
+ * g_ctx.pipe_layouts[lid]) over `bufs`, in binding order. Nothing is submitted
+ * here unless GPU.sync_mode is :eager; see gpu_flush. Exported so that add-on
+ * gems (mruby-gpu-kernel) can run pipelines of their own through the same
+ * batch. */
+void dispatch_pipeline(mrb_state *mrb, VkPipeline pipeline, LayoutId lid,
+                       GpuBuffer **bufs, int num_buffers,
+                       const void *push_data, uint32_t push_size,
+                       uint32_t group_x, uint32_t group_y, uint32_t group_z);
+
+/* Same, for one of the built-in pipelines. */
 void dispatch_compute(mrb_state *mrb, PipeId pipe_id,
-                      VkBuffer *buffers, VkDeviceSize *sizes, int num_buffers,
+                      GpuBuffer **bufs, int num_buffers,
                       const void *push_data, uint32_t push_size,
                       uint32_t group_x, uint32_t group_y, uint32_t group_z);
+
+/* Submit everything recorded so far, wait for it, and reset for the next batch.
+ * Also frees buffers parked in the graveyard. Safe to call with nothing
+ * pending. */
+void gpu_flush(mrb_state *mrb);
+
+/* Flush only if the pending batch references `buf`. Every host-side read or
+ * write of a buffer goes through this (map_buffer calls it). */
+void gpu_sync_buffer(mrb_state *mrb, GpuBuffer *buf);
 
 /* ---- gpu_buffer.c ---- */
 GpuBuffer *create_buffer(mrb_state *mrb, uint32_t n);
