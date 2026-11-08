@@ -1,5 +1,7 @@
 # mruby-gpu-narray
 
+[![CI](https://github.com/yujiteshima/mruby-gpu-narray/actions/workflows/ci.yml/badge.svg)](https://github.com/yujiteshima/mruby-gpu-narray/actions/workflows/ci.yml)
+
 > **Numo-like N-dimensional array for mruby, computed on the GPU via Vulkan Compute.**
 > The code you prototype with is the code you deploy to the edge — no Python→C++ rewrite.
 
