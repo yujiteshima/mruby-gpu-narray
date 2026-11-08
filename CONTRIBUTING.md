@@ -59,6 +59,26 @@ git-ignored — do not commit them.
 parity yet). Please add cases there for any behavior you change or add, and make
 sure it prints `ALL TESTS PASSED` before opening a PR.
 
+`test/shader_error_test.rb` is separate because it has to break the GPU context,
+which is a process-wide singleton — running it alongside the main suite would
+leave every later test without pipelines. Run it on its own:
+
+```sh
+./build/host/bin/mruby test/shader_error_test.rb            # missing .spv files
+./build/host/bin/mruby test/shader_error_test.rb <bad-dir>  # .spv the driver rejects
+```
+
+## Error handling
+
+Every Vulkan call that returns a `VkResult` goes through `VK_CHECK`, which
+raises an mruby exception instead of leaving an unusable handle behind. Please
+keep new calls checked — an unchecked failure surfaces either as a crash of the
+whole VM or, worse, as a plausible-looking wrong number.
+
+Because `mrb_raise` unwinds, anything already allocated has to be released
+*before* the check. In particular, wrap a new `GpuBuffer` with `wrap_buffer`
+before the dispatch that fills it, so the GC owns it if the dispatch raises.
+
 ## Reporting issues
 
 GPU behavior is environment-specific, so please include:
