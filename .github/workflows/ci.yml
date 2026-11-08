@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.suite }} (mruby ${{ matrix.mruby }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        mruby: ['3.4.0', '4.0.0']
+        # narray: this gem's own tests.
+        # kernel: mruby-gpu-kernel's main branch built on top of this change, so a
+        #         change here that breaks the add-on gem shows up before it is merged.
+        suite: [narray, kernel]
+        exclude:
+          - suite: kernel
+            mruby: '3.4.0'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain and Mesa lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison ruby rake \
+            mesa-vulkan-drivers libvulkan-dev glslang-tools vulkan-tools
+          # GitHub-hosted runners have no GPU, so Vulkan runs on lavapipe, Mesa's CPU
+          # implementation. Its ICD file is lvp_icd.x86_64.json on x64 and
+          # lvp_icd.json on arm64.
+          echo "VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)" >> "$GITHUB_ENV"
+
+      - name: Show the Vulkan device
+        run: vulkaninfo --summary | grep -E 'deviceName|driverName|apiVersion'
+
+      - name: Fetch mruby-gpu-kernel (main)
+        if: matrix.suite == 'kernel'
+        run: git clone --depth 1 https://github.com/yujiteshima/mruby-gpu-kernel.git "$RUNNER_TEMP/mruby-gpu-kernel"
+
+      - name: Build mruby ${{ matrix.mruby }}
+        run: |
+          git clone --depth 1 --branch "${{ matrix.mruby }}" https://github.com/mruby/mruby.git "$RUNNER_TEMP/mruby"
+          {
+            echo "MRuby::Build.new do |conf|"
+            echo "  toolchain :gcc"
+            echo "  conf.gembox 'default'"
+            echo "  conf.gem '$GITHUB_WORKSPACE'"
+            if [ "${{ matrix.suite }}" = kernel ]; then
+              echo "  conf.gem '$RUNNER_TEMP/mruby-gpu-kernel'"
+            fi
+            echo "end"
+          } > "$RUNNER_TEMP/build_config.rb"
+          cat "$RUNNER_TEMP/build_config.rb"
+          cd "$RUNNER_TEMP/mruby"
+          MRUBY_CONFIG="$RUNNER_TEMP/build_config.rb" rake -j"$(nproc)"
+
+      - name: Test
+        shell: bash
+        run: |
+          if [ "${{ matrix.suite }}" = kernel ]; then
+            test_file="$RUNNER_TEMP/mruby-gpu-kernel/test/kernel_test.rb"
+          else
+            test_file=test/narray_test.rb
+          fi
+          "$RUNNER_TEMP/mruby/build/host/bin/mruby" "$test_file" | tee "$RUNNER_TEMP/test.log"
+          # The test script prints a summary but exits 0 either way, so check its last line.
+          grep -qx 'ALL TESTS PASSED' "$RUNNER_TEMP/test.log"
