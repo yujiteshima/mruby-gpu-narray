@@ -4,7 +4,14 @@ MRuby::Gem::Specification.new('mruby-gpu-narray') do |spec|
   spec.version = '0.1.0'
   spec.summary = 'GPU N-dimensional array (Numo-like) for mruby via Vulkan Compute'
 
-  # Only dependency is the Vulkan loader. No ncnn / SDL2 / glslang lib / OpenMP.
+  # The Vulkan core (device, buffers, the deferred batch) is mruby-gpu-runtime.
+  # It is not on mgem-list yet, so it comes from GitHub unless the build
+  # configuration already lists it (for example from a local path).
+  spec.add_dependency 'mruby-gpu-runtime', github: 'yujiteshima/mruby-gpu-runtime'
+
+  # The only link dependency is the Vulkan loader. No ncnn / SDL2 / glslang lib /
+  # OpenMP. This gem still calls Vulkan itself to create and destroy its
+  # pipelines.
   spec.linker.libraries << 'vulkan'
 
   gem_dir    = File.dirname(File.expand_path(__FILE__))
