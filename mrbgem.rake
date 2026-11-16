@@ -6,8 +6,10 @@ MRuby::Gem::Specification.new('mruby-gpu-narray') do |spec|
 
   # The Vulkan core (device, buffers, the deferred batch) is mruby-gpu-runtime.
   # It is not on mgem-list yet, so it comes from GitHub unless the build
-  # configuration already lists it (for example from a local path).
-  spec.add_dependency 'mruby-gpu-runtime', github: 'yujiteshima/mruby-gpu-runtime'
+  # configuration already lists it (for example from a local path). Name the
+  # branch: mruby clones "master" when none is given, and the repository has
+  # only "main".
+  spec.add_dependency 'mruby-gpu-runtime', github: 'yujiteshima/mruby-gpu-runtime', branch: 'main'
 
   # The only link dependency is the Vulkan loader. No ncnn / SDL2 / glslang lib /
   # OpenMP. This gem still calls Vulkan itself to create and destroy its
