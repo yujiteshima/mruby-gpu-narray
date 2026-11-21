@@ -101,10 +101,13 @@ GPU behavior is environment-specific, so please include:
 
 `v0.1.0` is the **L1 foundation**: FP32, 1-D `GPU::SFloat`, element-wise and
 scalar arithmetic, `sum` / `mean`, and a radix-2 `#rfft` with its spectral
-helpers. Work in progress: N-dimensional (2-D) support, an inverse transform,
-and a kernel DSL. Dense linear algebra (GEMM / SVD) is intentionally **out of
-scope on Vulkan** (see the README roadmap for why). If you're unsure whether a
-change fits, please open an issue first.
+helpers. `v0.2.0`, the baseline for the Ruby Association Grant 2026 work,
+records dispatches into one batch and submits it when a result is read, checks
+every Vulkan result, and runs the tests on lavapipe in CI. Work in progress:
+N-dimensional (2-D) support, an inverse transform, and a kernel DSL. Dense
+linear algebra (GEMM / SVD) is intentionally **out of scope on Vulkan** (see
+the README roadmap for why). If you're unsure whether a change fits, please
+open an issue first.
 
 ## License
 
