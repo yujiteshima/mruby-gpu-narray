@@ -86,10 +86,12 @@ Scalar arithmetic is supported with the **array on the left** (`a * 2`). The rev
 - `glslangValidator` (from the Vulkan SDK / `glslang`) to compile the shaders.
 - mruby 3.x.
 - [mruby-gpu-runtime](https://github.com/yujiteshima/mruby-gpu-runtime), the Vulkan
-  core this gem is built on (device, buffers, the deferred batch). The build fetches it
-  from GitHub unless `build_config.rb` already lists it.
+  core this gem is built on (device, buffers, pipelines, the deferred batch). The build
+  fetches it from GitHub unless `build_config.rb` already lists it. This gem uses only
+  its C API (`gpu_runtime.h`) and does not call Vulkan itself.
 
-The gem's only link dependency is the Vulkan loader (`-lvulkan`).
+The only link dependency is the Vulkan loader (`-lvulkan`), which comes with
+mruby-gpu-runtime.
 
 ## Build
 
@@ -203,7 +205,8 @@ remove those — that is what fusing the expression into one shader is for
 ([mruby-gpu-kernel](https://github.com/yujiteshima/mruby-gpu-kernel): 0.35 ms).
 
 Add-on gems can put their own pipelines into the same batch through
-`dispatch_pipeline()` in mruby-gpu-runtime's `include/gpu_runtime.h`.
+`gpu_rt_dispatch()` in mruby-gpu-runtime's `include/gpu_runtime.h`, and read a
+`GPU::NArray` passed in from Ruby with `gpu_rt_buffer_get()`.
 
 ### Limits and failures
 

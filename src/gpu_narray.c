@@ -4,13 +4,16 @@
  *   GPU::NArray  -- abstract base (holds all shared instance methods)
  *   GPU::SFloat  -- FP32, 1-D. The only dtype for now.
  *
- * The data always lives in a GPU (VkBuffer-backed) GpuBuffer. It is copied to
- * the host only on #to_a / #head. Arithmetic runs as compute dispatches.
+ * The data always lives in a GPU buffer (a gpu_rt_buffer of mruby-gpu-runtime).
+ * It is copied to the host only on #to_a / #head. Arithmetic runs as compute
+ * dispatches.
  *
- * Buffers, dispatch and the GPU module's device and batch functions (GPU.info,
- * GPU.sync, GPU.pending, GPU.sync_mode) come from mruby-gpu-runtime.
+ * Buffers, pipelines, dispatch and the GPU module's device and batch functions
+ * (GPU.info, GPU.sync, GPU.pending, GPU.sync_mode) come from
+ * mruby-gpu-runtime, through its C API (gpu_runtime.h). This gem does not call
+ * Vulkan itself.
  */
-#include "gpu_internal.h"
+#include "narray_internal.h"
 #include <mruby/numeric.h>
 
 /* The shader directory is embedded by mrbgem.rake into a generated header so
@@ -47,18 +50,28 @@ static void ensure_pipeline(mrb_state *mrb, PipeId pipe) {
         "the Vulkan driver rejected shader '%s.spv': %s (VkResult %d). "
         "The SPIR-V was found and loaded, so this is a device or driver "
         "limitation, not a missing build step.",
-        gpu_pipe_name(pipe), gpu_result_name(g_pipes.error[pipe]),
-        (int)g_pipes.error[pipe]);
+        gpu_pipe_name(pipe), g_pipes.error[pipe].reason,
+        (int)g_pipes.error[pipe].vk_result);
       break;
   }
 }
 
-/* Return the GpuBuffer if v is one of our arrays, else NULL (no raise). */
-static GpuBuffer *as_narray(mrb_value v) {
-  if (mrb_type(v) == MRB_TT_CDATA && DATA_TYPE(v) == &gpu_buffer_type) {
-    return (GpuBuffer *)DATA_PTR(v);
+/* Element count of a float32 array. An SComplex holds two per point. */
+static uint32_t narray_len(mrb_state *mrb, gpu_rt_buffer *buf) {
+  return (uint32_t)(gpu_rt_buffer_size(mrb, buf) / sizeof(float));
+}
+
+/* A new buffer of n float32 elements, not yet owned by anything: wrap it
+ * before the next call that can raise. */
+static gpu_rt_buffer *narray_buffer(mrb_state *mrb, uint32_t n) {
+  gpu_rt_buffer_desc desc = {
+    .size = (size_t)n * sizeof(float),
+    .usage = GPU_RT_BUFFER_STORAGE
+  };
+  if (desc.size / sizeof(float) != n) {   /* size_t narrower than 34 bits */
+    mrb_raisef(mrb, E_ARGUMENT_ERROR, "array size %i is too large for this platform", (mrb_int)n);
   }
-  return NULL;
+  return gpu_rt_buffer_create(mrb, gpu_rt_context_get(mrb), &desc);
 }
 
 /* =========================================================================
@@ -77,8 +90,8 @@ static mrb_value sfloat_s_new(mrb_state *mrb, mrb_value self) {
                n, (mrb_int)UINT32_MAX);
   }
   ensure_initialized(mrb);
-  GpuBuffer *buf = create_buffer(mrb, (uint32_t)n);
-  return wrap_buffer(mrb, mrb_class_ptr(self), buf);
+  gpu_rt_buffer *buf = narray_buffer(mrb, (uint32_t)n);
+  return gpu_rt_buffer_wrap(mrb, mrb_class_ptr(self), buf);
 }
 
 /* GPU::SFloat.cast([...]) -> array copied from a Ruby Array (ints or floats) */
@@ -88,16 +101,16 @@ static mrb_value sfloat_s_cast(mrb_state *mrb, mrb_value self) {
   ensure_initialized(mrb);
 
   mrb_int n = RARRAY_LEN(ary);
-  GpuBuffer *buf = create_buffer(mrb, (uint32_t)n);
+  gpu_rt_buffer *buf = narray_buffer(mrb, (uint32_t)n);
   /* Hand the buffer to the GC before anything that can raise -- mapping can
    * fail, and mrb_as_float rejects a non-numeric element. An unwrapped buffer
    * belongs to nobody, so a raise here used to leak it. */
-  mrb_value result = wrap_buffer(mrb, mrb_class_ptr(self), buf);
-  float *m = map_buffer(mrb, buf);
+  mrb_value result = gpu_rt_buffer_wrap(mrb, mrb_class_ptr(self), buf);
+  float *m = (float *)gpu_rt_buffer_map(mrb, buf);
   for (mrb_int i = 0; i < n; i++) {
     m[i] = (float)mrb_as_float(mrb, mrb_ary_ref(mrb, ary, i));
   }
-  unmap_buffer(buf);
+  gpu_rt_buffer_unmap(mrb, buf);
   return result;
 }
 
@@ -107,13 +120,13 @@ static mrb_value sfloat_s_cast(mrb_state *mrb, mrb_value self) {
 
 /* #to_a -> Ruby Array of every element (host copy) */
 static mrb_value narray_to_a(mrb_state *mrb, mrb_value self) {
-  GpuBuffer *buf = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
-  float *m = map_buffer(mrb, buf);
-  mrb_value ary = mrb_ary_new_capa(mrb, buf->n);
-  for (uint32_t i = 0; i < buf->n; i++) {
+  gpu_rt_buffer *buf = gpu_rt_buffer_get(mrb, self);
+  float *m = (float *)gpu_rt_buffer_map(mrb, buf);
+  mrb_value ary = mrb_ary_new_capa(mrb, narray_len(mrb, buf));
+  for (uint32_t i = 0; i < narray_len(mrb, buf); i++) {
     mrb_ary_push(mrb, ary, mrb_float_value(mrb, (mrb_float)m[i]));
   }
-  unmap_buffer(buf);
+  gpu_rt_buffer_unmap(mrb, buf);
   return ary;
 }
 
@@ -121,34 +134,34 @@ static mrb_value narray_to_a(mrb_state *mrb, mrb_value self) {
 static mrb_value narray_head(mrb_state *mrb, mrb_value self) {
   mrb_int k;
   mrb_get_args(mrb, "i", &k);
-  GpuBuffer *buf = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
+  gpu_rt_buffer *buf = gpu_rt_buffer_get(mrb, self);
   if (k < 0) k = 0;
-  if ((uint32_t)k > buf->n) k = buf->n;
-  float *m = map_buffer(mrb, buf);
+  if ((uint32_t)k > narray_len(mrb, buf)) k = narray_len(mrb, buf);
+  float *m = (float *)gpu_rt_buffer_map(mrb, buf);
   mrb_value ary = mrb_ary_new_capa(mrb, k);
   for (mrb_int i = 0; i < k; i++) {
     mrb_ary_push(mrb, ary, mrb_float_value(mrb, (mrb_float)m[i]));
   }
-  unmap_buffer(buf);
+  gpu_rt_buffer_unmap(mrb, buf);
   return ary;
 }
 
 /* #size / #length -> element count */
 static mrb_value narray_size(mrb_state *mrb, mrb_value self) {
-  GpuBuffer *buf = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
-  return mrb_fixnum_value(buf->n);
+  gpu_rt_buffer *buf = gpu_rt_buffer_get(mrb, self);
+  return mrb_fixnum_value(narray_len(mrb, buf));
 }
 
 /* #seq(start=0, step=1) -> self, filled with start, start+step, ... (host write) */
 static mrb_value narray_seq(mrb_state *mrb, mrb_value self) {
   mrb_float start = 0.0, step = 1.0;
   mrb_get_args(mrb, "|ff", &start, &step);
-  GpuBuffer *buf = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
-  float *m = map_buffer(mrb, buf);
-  for (uint32_t i = 0; i < buf->n; i++) {
+  gpu_rt_buffer *buf = gpu_rt_buffer_get(mrb, self);
+  float *m = (float *)gpu_rt_buffer_map(mrb, buf);
+  for (uint32_t i = 0; i < narray_len(mrb, buf); i++) {
     m[i] = (float)(start + step * (double)i);
   }
-  unmap_buffer(buf);
+  gpu_rt_buffer_unmap(mrb, buf);
   return self;
 }
 
@@ -156,10 +169,10 @@ static mrb_value narray_seq(mrb_state *mrb, mrb_value self) {
 static mrb_value narray_fill(mrb_state *mrb, mrb_value self) {
   mrb_float v;
   mrb_get_args(mrb, "f", &v);
-  GpuBuffer *buf = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
-  float *m = map_buffer(mrb, buf);
-  for (uint32_t i = 0; i < buf->n; i++) m[i] = (float)v;
-  unmap_buffer(buf);
+  gpu_rt_buffer *buf = gpu_rt_buffer_get(mrb, self);
+  float *m = (float *)gpu_rt_buffer_map(mrb, buf);
+  for (uint32_t i = 0; i < narray_len(mrb, buf); i++) m[i] = (float)v;
+  gpu_rt_buffer_unmap(mrb, buf);
   return self;
 }
 
@@ -168,34 +181,34 @@ static mrb_value narray_fill(mrb_state *mrb, mrb_value self) {
  * ========================================================================= */
 
 /* element-wise binary op with another array: c = a (op) b */
-static mrb_value binop_nn(mrb_state *mrb, mrb_value self, GpuBuffer *rhs, PipeId pipe) {
-  GpuBuffer *a = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
-  if (a->n != rhs->n) {
+static mrb_value binop_nn(mrb_state *mrb, mrb_value self, gpu_rt_buffer *rhs, PipeId pipe) {
+  gpu_rt_buffer *a = gpu_rt_buffer_get(mrb, self);
+  if (narray_len(mrb, a) != narray_len(mrb, rhs)) {
     mrb_raisef(mrb, E_ARGUMENT_ERROR, "shape mismatch: %d vs %d",
-               (int)a->n, (int)rhs->n);
+               (int)narray_len(mrb, a), (int)narray_len(mrb, rhs));
   }
   ensure_pipeline(mrb, pipe);
-  GpuBuffer *c = create_buffer(mrb, a->n);
+  gpu_rt_buffer *c = narray_buffer(mrb, narray_len(mrb, a));
   /* Wrapped before dispatching: dispatch_compute raises on a Vulkan failure,
    * and the GC can only free what it owns. */
-  mrb_value result = wrap_buffer(mrb, mrb_obj_class(mrb, self), c);
-  GpuBuffer *bufs[3] = {a, rhs, c};
-  uint32_t push = a->n;
+  mrb_value result = gpu_rt_buffer_wrap(mrb, mrb_obj_class(mrb, self), c);
+  gpu_rt_buffer *bufs[3] = {a, rhs, c};
+  uint32_t push = narray_len(mrb, a);
   dispatch_compute(mrb, pipe, bufs, 3, &push, sizeof(uint32_t),
-                   (a->n + 255) / 256, 1, 1);
+                   (narray_len(mrb, a) + 255) / 256, 1, 1);
   return result;
 }
 
 /* scalar op: PIPE_SCALE gives b = a * scalar, PIPE_ADDS gives b = a + scalar */
 static mrb_value scalar_op(mrb_state *mrb, mrb_value self, float scalar, PipeId pipe) {
-  GpuBuffer *a = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
+  gpu_rt_buffer *a = gpu_rt_buffer_get(mrb, self);
   ensure_pipeline(mrb, pipe);
-  GpuBuffer *b = create_buffer(mrb, a->n);
-  mrb_value result = wrap_buffer(mrb, mrb_obj_class(mrb, self), b);
-  GpuBuffer *bufs[2] = {a, b};
-  struct { uint32_t n; float s; } push = {a->n, scalar};
+  gpu_rt_buffer *b = narray_buffer(mrb, narray_len(mrb, a));
+  mrb_value result = gpu_rt_buffer_wrap(mrb, mrb_obj_class(mrb, self), b);
+  gpu_rt_buffer *bufs[2] = {a, b};
+  struct { uint32_t n; float s; } push = {narray_len(mrb, a), scalar};
   dispatch_compute(mrb, pipe, bufs, 2, &push, sizeof(push),
-                   (a->n + 255) / 256, 1, 1);
+                   (narray_len(mrb, a) + 255) / 256, 1, 1);
   return result;
 }
 
@@ -209,7 +222,7 @@ static mrb_value type_err(mrb_state *mrb, mrb_value o, const char *op) {
 
 static mrb_value narray_add(mrb_state *mrb, mrb_value self) {
   mrb_value o; mrb_get_args(mrb, "o", &o);
-  GpuBuffer *r = as_narray(o);
+  gpu_rt_buffer *r = gpu_rt_buffer_check(mrb, o);
   if (r) return binop_nn(mrb, self, r, PIPE_ADD);
   if (mrb_integer_p(o) || mrb_float_p(o))
     return scalar_op(mrb, self, (float)mrb_as_float(mrb, o), PIPE_ADDS);
@@ -218,7 +231,7 @@ static mrb_value narray_add(mrb_state *mrb, mrb_value self) {
 
 static mrb_value narray_sub(mrb_state *mrb, mrb_value self) {
   mrb_value o; mrb_get_args(mrb, "o", &o);
-  GpuBuffer *r = as_narray(o);
+  gpu_rt_buffer *r = gpu_rt_buffer_check(mrb, o);
   if (r) return binop_nn(mrb, self, r, PIPE_SUB);
   if (mrb_integer_p(o) || mrb_float_p(o))
     return scalar_op(mrb, self, -(float)mrb_as_float(mrb, o), PIPE_ADDS);
@@ -227,7 +240,7 @@ static mrb_value narray_sub(mrb_state *mrb, mrb_value self) {
 
 static mrb_value narray_mul(mrb_state *mrb, mrb_value self) {
   mrb_value o; mrb_get_args(mrb, "o", &o);
-  GpuBuffer *r = as_narray(o);
+  gpu_rt_buffer *r = gpu_rt_buffer_check(mrb, o);
   if (r) return binop_nn(mrb, self, r, PIPE_MUL);
   if (mrb_integer_p(o) || mrb_float_p(o))
     return scalar_op(mrb, self, (float)mrb_as_float(mrb, o), PIPE_SCALE);
@@ -236,7 +249,7 @@ static mrb_value narray_mul(mrb_state *mrb, mrb_value self) {
 
 static mrb_value narray_div(mrb_state *mrb, mrb_value self) {
   mrb_value o; mrb_get_args(mrb, "o", &o);
-  GpuBuffer *r = as_narray(o);
+  gpu_rt_buffer *r = gpu_rt_buffer_check(mrb, o);
   if (r) return binop_nn(mrb, self, r, PIPE_DIV);
   if (mrb_integer_p(o) || mrb_float_p(o)) {
     double s = mrb_as_float(mrb, o);        /* a / s == a * (1/s) via SCALE */
@@ -255,23 +268,23 @@ static mrb_value narray_neg(mrb_state *mrb, mrb_value self) {
  * it is never returned, but owning it means a raise from the dispatch or the
  * mapping cannot strand it. */
 static mrb_value narray_sum(mrb_state *mrb, mrb_value self) {
-  GpuBuffer *a = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
-  if (a->n == 0) return mrb_float_value(mrb, 0.0);
+  gpu_rt_buffer *a = gpu_rt_buffer_get(mrb, self);
+  if (narray_len(mrb, a) == 0) return mrb_float_value(mrb, 0.0);
   ensure_pipeline(mrb, PIPE_SUM);
 
-  uint32_t groups = (a->n + 255) / 256;
-  GpuBuffer *partial = create_buffer(mrb, groups);
-  wrap_buffer(mrb, mrb_obj_class(mrb, self), partial);
-  GpuBuffer *bufs[2] = {a, partial};
-  uint32_t push = a->n;
+  uint32_t groups = (narray_len(mrb, a) + 255) / 256;
+  gpu_rt_buffer *partial = narray_buffer(mrb, groups);
+  gpu_rt_buffer_wrap(mrb, mrb_obj_class(mrb, self), partial);
+  gpu_rt_buffer *bufs[2] = {a, partial};
+  uint32_t push = narray_len(mrb, a);
   dispatch_compute(mrb, PIPE_SUM, bufs, 2, &push, sizeof(uint32_t),
                    groups, 1, 1);
 
-  /* map_buffer flushes the batch: the partials are its last dispatch. */
-  float *pm = map_buffer(mrb, partial);
+  /* Mapping runs the batch: the partials are its last dispatch. */
+  float *pm = (float *)gpu_rt_buffer_map(mrb, partial);
   double total = 0.0;
   for (uint32_t i = 0; i < groups; i++) total += (double)pm[i];
-  unmap_buffer(partial);
+  gpu_rt_buffer_unmap(mrb, partial);
 
   return mrb_float_value(mrb, (mrb_float)total);
 }
@@ -279,7 +292,7 @@ static mrb_value narray_sum(mrb_state *mrb, mrb_value self) {
 /* =========================================================================
  * Spectral transform (runs on GPU)
  *
- * Radix-2 Cooley-Tukey. A length-k complex spectrum lives in a GpuBuffer of
+ * Radix-2 Cooley-Tukey. A length-k complex spectrum lives in a buffer of
  * 2k floats, interleaved (re, im) -- that is what GPU::SComplex wraps.
  * ========================================================================= */
 
@@ -294,8 +307,8 @@ static struct RClass *gpu_class(mrb_state *mrb, const char *name) {
  * same batch with a memory barrier between them, so the whole transform is
  * one submit. Nothing is copied to the host. */
 static mrb_value narray_rfft(mrb_state *mrb, mrb_value self) {
-  GpuBuffer *a = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
-  uint32_t n = a->n;
+  gpu_rt_buffer *a = gpu_rt_buffer_get(mrb, self);
+  uint32_t n = narray_len(mrb, a);
   if (n < 2 || (n & (n - 1)) != 0) {
     mrb_raisef(mrb, E_ARGUMENT_ERROR,
       "rfft needs a power-of-two length >= 2, got %d", (int)n);
@@ -308,15 +321,15 @@ static mrb_value narray_rfft(mrb_state *mrb, mrb_value self) {
 
   /* Wrapped up front: each of the log2(n) dispatches below can raise, and the
    * GC can only free a buffer it owns. */
-  GpuBuffer *x = create_buffer(mrb, 2 * n);
-  mrb_value result = wrap_buffer(mrb, gpu_class(mrb, "SComplex"), x);
+  gpu_rt_buffer *x = narray_buffer(mrb, 2 * n);
+  mrb_value result = gpu_rt_buffer_wrap(mrb, gpu_class(mrb, "SComplex"), x);
 
-  GpuBuffer *bitrev_bufs[2] = {a, x};
+  gpu_rt_buffer *bitrev_bufs[2] = {a, x};
   struct { uint32_t n, log2n; } bitrev_push = {n, log2n};
   dispatch_compute(mrb, PIPE_FFT_BITREV, bitrev_bufs, 2,
                    &bitrev_push, sizeof(bitrev_push), (n + 255) / 256, 1, 1);
 
-  GpuBuffer *stage_bufs[1] = {x};
+  gpu_rt_buffer *stage_bufs[1] = {x};
   uint32_t groups = (n / 2 + 255) / 256;
   for (uint32_t h = 1; h < n; h <<= 1) {
     struct { uint32_t n, h; } stage_push = {n, h};
@@ -333,16 +346,16 @@ static mrb_value narray_rfft(mrb_state *mrb, mrb_value self) {
 static mrb_value complex_reduce(mrb_state *mrb, mrb_value self, uint32_t square) {
   mrb_int count = -1;
   mrb_get_args(mrb, "|i", &count);
-  GpuBuffer *x = DATA_GET_PTR(mrb, self, &gpu_buffer_type, GpuBuffer);
-  uint32_t points = x->n / 2;
+  gpu_rt_buffer *x = gpu_rt_buffer_get(mrb, self);
+  uint32_t points = narray_len(mrb, x) / 2;
 
   if (count < 0) count = points / 2;          /* omitted -> the useful half */
   if (count > (mrb_int)points) count = points;
   ensure_pipeline(mrb, PIPE_CMAG);
 
-  GpuBuffer *out = create_buffer(mrb, (uint32_t)count);
-  mrb_value result = wrap_buffer(mrb, gpu_class(mrb, "SFloat"), out);
-  GpuBuffer *bufs[2] = {x, out};
+  gpu_rt_buffer *out = narray_buffer(mrb, (uint32_t)count);
+  mrb_value result = gpu_rt_buffer_wrap(mrb, gpu_class(mrb, "SFloat"), out);
+  gpu_rt_buffer *bufs[2] = {x, out};
   struct { uint32_t out_n, square; } push = {(uint32_t)count, square};
   dispatch_compute(mrb, PIPE_CMAG, bufs, 2, &push, sizeof(push),
                    ((uint32_t)count + 255) / 256, 1, 1);
@@ -378,6 +391,9 @@ static mrb_value gpu_s_init(mrb_state *mrb, mrb_value self) {
  * ========================================================================= */
 
 void mrb_mruby_gpu_narray_gem_init(mrb_state *mrb) {
+  /* Written against version 0.1 of the runtime's C API. */
+  gpu_rt_require(mrb, 0, 1);
+
   struct RClass *gpu = mrb_define_module(mrb, "GPU");
   mrb_define_module_function(mrb, gpu, "init", gpu_s_init, MRB_ARGS_REQ(1));
 
@@ -416,6 +432,5 @@ void mrb_mruby_gpu_narray_gem_init(mrb_state *mrb) {
 /* mruby runs gem finals in reverse dependency order, so this runs before
  * mruby-gpu-runtime's final, which drops the batch and tears the device down. */
 void mrb_mruby_gpu_narray_gem_final(mrb_state *mrb) {
-  (void)mrb;
-  narray_destroy_pipelines();
+  narray_destroy_pipelines(mrb);
 }

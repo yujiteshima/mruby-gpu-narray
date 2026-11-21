@@ -4,22 +4,23 @@
  * Vulkan initialization. The rest of that file moved to mruby-gpu-runtime;
  * this is the part that is about narray's own shaders.
  */
-#include "gpu_internal.h"
+#include "narray_internal.h"
 
 NArrayPipelines g_pipes = {0};
 
-/* Which descriptor-set layout each pipeline uses. */
-static const LayoutId pipe_to_layout[PIPE_COUNT] = {
-  LAYOUT_3BUF, /* ADD   */
-  LAYOUT_3BUF, /* SUB   */
-  LAYOUT_3BUF, /* MUL   */
-  LAYOUT_3BUF, /* DIV   */
-  LAYOUT_2BUF, /* SCALE */
-  LAYOUT_2BUF, /* ADDS  */
-  LAYOUT_2BUF, /* SUM   */
-  LAYOUT_2BUF, /* FFT_BITREV */
-  LAYOUT_2BUF, /* CMAG       */
-  LAYOUT_1BUF, /* FFT_STAGE  */
+/* What each shader binds: its storage buffers, and the bytes of its
+ * push-constant block. */
+static const gpu_rt_layout pipe_layouts[PIPE_COUNT] = {
+  { .storage_buffers = 3, .push_constant_size = 4 },  /* ADD:   { uint n; }          */
+  { .storage_buffers = 3, .push_constant_size = 4 },  /* SUB   */
+  { .storage_buffers = 3, .push_constant_size = 4 },  /* MUL   */
+  { .storage_buffers = 3, .push_constant_size = 4 },  /* DIV   */
+  { .storage_buffers = 2, .push_constant_size = 8 },  /* SCALE: { uint n; float s; } */
+  { .storage_buffers = 2, .push_constant_size = 8 },  /* ADDS  */
+  { .storage_buffers = 2, .push_constant_size = 4 },  /* SUM:   { uint n; }          */
+  { .storage_buffers = 2, .push_constant_size = 8 },  /* FFT_BITREV: { uint n, log2n; }      */
+  { .storage_buffers = 2, .push_constant_size = 8 },  /* CMAG:       { uint out_n, square; } */
+  { .storage_buffers = 1, .push_constant_size = 8 },  /* FFT_STAGE:  { uint n, h; }          */
 };
 
 /* SPIR-V file basenames (loaded from <shader_dir>/<name>.spv). */
@@ -48,7 +49,7 @@ static uint8_t *load_spv(const char *path, size_t *size) {
 }
 
 void narray_init(mrb_state *mrb, const char *shader_dir) {
-  gpu_ensure_initialized(mrb);
+  gpu_rt_context *ctx = gpu_rt_context_get(mrb);
   if (g_pipes.loaded) return;
 
   for (int p = 0; p < PIPE_COUNT; p++) {
@@ -59,7 +60,7 @@ void narray_init(mrb_state *mrb, const char *shader_dir) {
     uint8_t *spv_code = load_spv(spv_path, &spv_size);
     if (!spv_code) {
       fprintf(stderr, "mruby-gpu-narray: could not load %s (run `make -C shader`)\n", spv_path);
-      g_pipes.pipelines[p] = VK_NULL_HANDLE;
+      g_pipes.pipelines[p] = NULL;
       g_pipes.state[p]     = PIPE_MISSING_SPV;
       continue;
     }
@@ -67,38 +68,36 @@ void narray_init(mrb_state *mrb, const char *shader_dir) {
     /* A missing shader is not fatal -- only the operations that need it fail,
      * and ensure_pipeline reports why at that point. The distinction between
      * "no file" and "the driver rejected it" is recorded here because both
-     * leave the handle VK_NULL_HANDLE but call for opposite fixes. */
-    VkResult r = gpu_create_pipeline((const uint32_t *)spv_code, spv_size,
-                                     pipe_to_layout[p], &g_pipes.pipelines[p]);
+     * leave the handle NULL but call for opposite fixes. Passing an error
+     * struct makes the runtime report a rejected shader instead of raising. */
+    g_pipes.pipelines[p] = gpu_rt_pipeline_create(mrb, ctx, spv_code, spv_size,
+                                                  &pipe_layouts[p], pipe_names[p],
+                                                  &g_pipes.error[p]);
     free(spv_code);
-    if (r == VK_SUCCESS) {
-      g_pipes.state[p] = PIPE_READY;
-    } else {
-      g_pipes.state[p] = PIPE_CREATE_FAILED;
-      g_pipes.error[p] = r;
-    }
+    g_pipes.state[p] = g_pipes.pipelines[p] ? PIPE_READY : PIPE_CREATE_FAILED;
   }
   g_pipes.loaded = 1;
 }
 
-void narray_destroy_pipelines(void) {
-  if (g_pipes.loaded && g_ctx.initialized) {
-    for (int p = 0; p < PIPE_COUNT; p++) {
-      if (g_pipes.pipelines[p] != VK_NULL_HANDLE) {
-        vkDestroyPipeline(g_ctx.device, g_pipes.pipelines[p], NULL);
-      }
-    }
+void narray_destroy_pipelines(mrb_state *mrb) {
+  for (int p = 0; p < PIPE_COUNT; p++) {
+    gpu_rt_pipeline_release(mrb, g_pipes.pipelines[p]);   /* NULL is ignored */
   }
   memset(&g_pipes, 0, sizeof(g_pipes));
 }
 
 void dispatch_compute(
     mrb_state *mrb, PipeId pipe_id,
-    GpuBuffer **bufs, int num_buffers,
+    gpu_rt_buffer **bufs, int num_buffers,
     const void *push_data, uint32_t push_size,
     uint32_t group_x, uint32_t group_y, uint32_t group_z)
 {
-  dispatch_pipeline(mrb, g_pipes.pipelines[pipe_id], pipe_to_layout[pipe_id],
-                    bufs, num_buffers, push_data, push_size,
-                    group_x, group_y, group_z);
+  gpu_rt_dispatch_desc d = {
+    .pipeline = g_pipes.pipelines[pipe_id],
+    .buffers = bufs, .buffer_count = (uint32_t)num_buffers,
+    .push_constants = push_data, .push_constant_size = push_size,
+    .groups = { group_x, group_y, group_z },
+    .label = pipe_names[pipe_id],
+  };
+  gpu_rt_dispatch(mrb, &d);
 }
