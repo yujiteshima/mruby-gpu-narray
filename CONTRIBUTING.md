@@ -70,14 +70,17 @@ leave every later test without pipelines. Run it on its own:
 
 ## Error handling
 
-Every Vulkan call that returns a `VkResult` goes through `VK_CHECK`, which
-raises an mruby exception instead of leaving an unusable handle behind. Please
-keep new calls checked — an unchecked failure surfaces either as a crash of the
-whole VM or, worse, as a plausible-looking wrong number.
+This gem does not call Vulkan itself. Buffers, pipelines and dispatches go
+through mruby-gpu-runtime's C API (`gpu_runtime.h`, the `gpu_rt_` functions),
+and the runtime checks every Vulkan result: a failed call raises an mruby
+exception instead of leaving an unusable handle behind. Please keep it that
+way, and add what is missing to the runtime rather than including `vulkan.h`
+here.
 
 Because `mrb_raise` unwinds, anything already allocated has to be released
-*before* the check. In particular, wrap a new `GpuBuffer` with `wrap_buffer`
-before the dispatch that fills it, so the GC owns it if the dispatch raises.
+*before* a call that can raise. In particular, wrap a new buffer with
+`gpu_rt_buffer_wrap` as soon as it is created, before the dispatch that fills
+it, so the GC owns it if the dispatch raises.
 
 ## Reporting issues
 
