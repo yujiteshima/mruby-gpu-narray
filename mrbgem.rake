@@ -1,7 +1,7 @@
 MRuby::Gem::Specification.new('mruby-gpu-narray') do |spec|
   spec.license = 'MIT'
   spec.authors = 'Yuji Teshima'
-  spec.version = '0.1.0'
+  spec.version = '0.2.0'
   spec.summary = 'GPU N-dimensional array (Numo-like) for mruby via Vulkan Compute'
 
   # The Vulkan core (device, buffers, the deferred batch) is mruby-gpu-runtime.
