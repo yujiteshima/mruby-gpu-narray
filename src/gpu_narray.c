@@ -6,9 +6,11 @@
  *
  * The data always lives in a GPU (VkBuffer-backed) GpuBuffer. It is copied to
  * the host only on #to_a / #head. Arithmetic runs as compute dispatches.
+ *
+ * Buffers, dispatch and the GPU module's device and batch functions (GPU.info,
+ * GPU.sync, GPU.pending, GPU.sync_mode) come from mruby-gpu-runtime.
  */
 #include "gpu_internal.h"
-#include <mruby/hash.h>
 #include <mruby/numeric.h>
 
 /* The shader directory is embedded by mrbgem.rake into a generated header so
@@ -25,12 +27,12 @@
 
 /* ---- lazy initialization ---- */
 static void ensure_initialized(mrb_state *mrb) {
-  if (!g_ctx.initialized) gpu_init(mrb, GPU_NARRAY_SHADER_DIR);
+  narray_init(mrb, GPU_NARRAY_SHADER_DIR);
 }
 
 static void ensure_pipeline(mrb_state *mrb, PipeId pipe) {
   ensure_initialized(mrb);
-  switch (g_ctx.pipe_state[pipe]) {
+  switch (g_pipes.state[pipe]) {
     case PIPE_READY:
       return;
     case PIPE_MISSING_SPV:
@@ -45,8 +47,8 @@ static void ensure_pipeline(mrb_state *mrb, PipeId pipe) {
         "the Vulkan driver rejected shader '%s.spv': %s (VkResult %d). "
         "The SPIR-V was found and loaded, so this is a device or driver "
         "limitation, not a missing build step.",
-        gpu_pipe_name(pipe), gpu_result_name(g_ctx.pipe_error[pipe]),
-        (int)g_ctx.pipe_error[pipe]);
+        gpu_pipe_name(pipe), gpu_result_name(g_pipes.error[pipe]),
+        (int)g_pipes.error[pipe]);
       break;
   }
 }
@@ -361,82 +363,14 @@ static mrb_value complex_power_spectrum(mrb_state *mrb, mrb_value self) {
  * GPU module functions
  * ========================================================================= */
 
+/* GPU.init(dir) -> nil. Load the built-in shaders from `dir` instead of the
+ * directory baked in at build time. Has an effect only before the first array
+ * operation, which loads them from the default directory. */
 static mrb_value gpu_s_init(mrb_state *mrb, mrb_value self) {
   const char *path;
   mrb_get_args(mrb, "z", &path);
-  gpu_init(mrb, path);
+  narray_init(mrb, path);
   return mrb_nil_value();
-}
-
-static mrb_value gpu_s_device_name(mrb_state *mrb, mrb_value self) {
-  ensure_initialized(mrb);
-  VkPhysicalDeviceProperties props;
-  vkGetPhysicalDeviceProperties(g_ctx.physical_device, &props);
-  return mrb_str_new_cstr(mrb, props.deviceName);
-}
-
-static mrb_value gpu_s_info(mrb_state *mrb, mrb_value self) {
-  ensure_initialized(mrb);
-  VkPhysicalDeviceProperties props;
-  vkGetPhysicalDeviceProperties(g_ctx.physical_device, &props);
-
-  char api_ver[32];
-  snprintf(api_ver, sizeof(api_ver), "%d.%d.%d",
-    VK_VERSION_MAJOR(props.apiVersion),
-    VK_VERSION_MINOR(props.apiVersion),
-    VK_VERSION_PATCH(props.apiVersion));
-
-  mrb_value h = mrb_hash_new(mrb);
-  mrb_hash_set(mrb, h, mrb_symbol_value(mrb_intern_cstr(mrb, "device")),
-               mrb_str_new_cstr(mrb, props.deviceName));
-  mrb_hash_set(mrb, h, mrb_symbol_value(mrb_intern_cstr(mrb, "api_version")),
-               mrb_str_new_cstr(mrb, api_ver));
-  mrb_hash_set(mrb, h, mrb_symbol_value(mrb_intern_cstr(mrb, "backend")),
-               mrb_str_new_cstr(mrb, "Vulkan"));
-  /* The dispatch bound, so callers (and bug reports) can see the largest
-   * array a single operation can cover: max_workgroups * 256 elements. */
-  mrb_hash_set(mrb, h, mrb_symbol_value(mrb_intern_cstr(mrb, "max_workgroups")),
-               mrb_fixnum_value((mrb_int)g_ctx.max_workgroups));
-  return h;
-}
-
-/* GPU.sync -> nil. Run everything recorded so far and wait for it. Reading a
- * result does this implicitly; call it yourself to time a batch, or before
- * handing a buffer to something outside this library. */
-static mrb_value gpu_s_sync(mrb_state *mrb, mrb_value self) {
-  gpu_flush(mrb);
-  return mrb_nil_value();
-}
-
-/* GPU.pending -> Integer: dispatches recorded but not yet submitted. */
-static mrb_value gpu_s_pending(mrb_state *mrb, mrb_value self) {
-  return mrb_fixnum_value((mrb_int)g_ctx.batch_dispatches);
-}
-
-/* GPU.sync_mode -> :deferred | :eager
- *
- * :deferred (default) records dispatches and submits them together when a
- * result is needed. :eager submits and waits after every dispatch -- the
- * behaviour before batching existed, kept for measuring the difference. */
-static mrb_value gpu_s_sync_mode(mrb_state *mrb, mrb_value self) {
-  /* Two literals, not one ternary: mrb_intern_lit takes sizeof its argument. */
-  return mrb_symbol_value(g_ctx.eager ? mrb_intern_lit(mrb, "eager")
-                                      : mrb_intern_lit(mrb, "deferred"));
-}
-
-static mrb_value gpu_s_set_sync_mode(mrb_state *mrb, mrb_value self) {
-  mrb_sym mode;
-  mrb_get_args(mrb, "n", &mode);
-  if (mode == mrb_intern_lit(mrb, "eager")) {
-    g_ctx.eager = 1;
-    gpu_flush(mrb);   /* nothing may stay queued once the mode says nothing is */
-  } else if (mode == mrb_intern_lit(mrb, "deferred")) {
-    g_ctx.eager = 0;
-  } else {
-    mrb_raisef(mrb, E_ARGUMENT_ERROR,
-      "GPU.sync_mode must be :deferred or :eager, got :%n", mode);
-  }
-  return mrb_symbol_value(mode);
 }
 
 /* =========================================================================
@@ -445,13 +379,7 @@ static mrb_value gpu_s_set_sync_mode(mrb_state *mrb, mrb_value self) {
 
 void mrb_mruby_gpu_narray_gem_init(mrb_state *mrb) {
   struct RClass *gpu = mrb_define_module(mrb, "GPU");
-  mrb_define_module_function(mrb, gpu, "init",        gpu_s_init,        MRB_ARGS_REQ(1));
-  mrb_define_module_function(mrb, gpu, "device_name", gpu_s_device_name, MRB_ARGS_NONE());
-  mrb_define_module_function(mrb, gpu, "info",        gpu_s_info,        MRB_ARGS_NONE());
-  mrb_define_module_function(mrb, gpu, "sync",        gpu_s_sync,        MRB_ARGS_NONE());
-  mrb_define_module_function(mrb, gpu, "pending",     gpu_s_pending,     MRB_ARGS_NONE());
-  mrb_define_module_function(mrb, gpu, "sync_mode",   gpu_s_sync_mode,   MRB_ARGS_NONE());
-  mrb_define_module_function(mrb, gpu, "sync_mode=",  gpu_s_set_sync_mode, MRB_ARGS_REQ(1));
+  mrb_define_module_function(mrb, gpu, "init", gpu_s_init, MRB_ARGS_REQ(1));
 
   struct RClass *narray = mrb_define_class_under(mrb, gpu, "NArray", mrb->object_class);
   MRB_SET_INSTANCE_TT(narray, MRB_TT_CDATA);
@@ -485,35 +413,9 @@ void mrb_mruby_gpu_narray_gem_init(mrb_state *mrb) {
                     complex_power_spectrum, MRB_ARGS_OPT(1));
 }
 
+/* mruby runs gem finals in reverse dependency order, so this runs before
+ * mruby-gpu-runtime's final, which drops the batch and tears the device down. */
 void mrb_mruby_gpu_narray_gem_final(mrb_state *mrb) {
-  if (g_ctx.initialized) {
-    /* Whatever is still recorded was never submitted and nobody can observe
-     * it now, so it is dropped rather than run. Nothing is in flight: every
-     * submit is waited on before gpu_flush returns. */
-    g_ctx.batch_recording = 0;
-    for (size_t i = 0; i < g_ctx.graveyard_len; i++) {
-      vkDestroyBuffer(g_ctx.device, g_ctx.graveyard[i]->buffer, NULL);
-      vkFreeMemory(g_ctx.device, g_ctx.graveyard[i]->memory, NULL);
-      mrb_free(mrb, g_ctx.graveyard[i]);
-    }
-    g_ctx.graveyard_len = 0;
-    free(g_ctx.graveyard);
-    g_ctx.graveyard = NULL;
-    g_ctx.graveyard_cap = 0;
-    vkDestroyFence(g_ctx.device, g_ctx.batch_fence, NULL);
-    vkDestroyDescriptorPool(g_ctx.device, g_ctx.desc_pool, NULL);
-    for (int p = 0; p < PIPE_COUNT; p++) {
-      if (g_ctx.pipelines[p] != VK_NULL_HANDLE) {
-        vkDestroyPipeline(g_ctx.device, g_ctx.pipelines[p], NULL);
-      }
-    }
-    for (int l = 0; l < LAYOUT_COUNT; l++) {
-      vkDestroyPipelineLayout(g_ctx.device, g_ctx.pipe_layouts[l], NULL);
-      vkDestroyDescriptorSetLayout(g_ctx.device, g_ctx.desc_layouts[l], NULL);
-    }
-    vkDestroyCommandPool(g_ctx.device, g_ctx.cmd_pool, NULL);
-    vkDestroyDevice(g_ctx.device, NULL);
-    vkDestroyInstance(g_ctx.instance, NULL);
-    g_ctx.initialized = 0;
-  }
+  (void)mrb;
+  narray_destroy_pipelines();
 }

@@ -49,7 +49,7 @@ built on it:
 | Spectral | `#rfft` → `GPU::SComplex`; `#magnitude(k)`, `#power_spectrum(k)` |
 | Host transfer | `#to_a`, `#head(k)` |
 | Metadata | `#size` / `#length`, `#shape`, `#ndim` |
-| Device | `GPU.info` (device, API version, backend, `:max_workgroups`), `GPU.device_name`, `GPU.init(dir)` |
+| Device | `GPU.info` (device, API version, backend, `:max_workgroups`) and `GPU.device_name`, from [mruby-gpu-runtime](https://github.com/yujiteshima/mruby-gpu-runtime); `GPU.init(dir)` |
 
 Data lives in a `VkBuffer` the whole time; the only host copies happen in `#to_a` /
 `#head`. Arithmetic, reduction and the FFT are Vulkan compute dispatches.
@@ -85,6 +85,9 @@ Scalar arithmetic is supported with the **array on the left** (`a * 2`). The rev
   - **Dev:** also runs on macOS via MoltenVK (portability is auto-detected).
 - `glslangValidator` (from the Vulkan SDK / `glslang`) to compile the shaders.
 - mruby 3.x.
+- [mruby-gpu-runtime](https://github.com/yujiteshima/mruby-gpu-runtime), the Vulkan
+  core this gem is built on (device, buffers, the deferred batch). The build fetches it
+  from GitHub unless `build_config.rb` already lists it.
 
 The gem's only link dependency is the Vulkan loader (`-lvulkan`).
 
@@ -134,7 +137,7 @@ GPU::SFloat (mruby)                         mrblib/gpu_narray.rb  (shape, mean, 
    ▼
 src/gpu_narray.c    dtype methods; picks a pipeline; keeps results on the GPU
    ▼
-src/gpu_vulkan.c    dispatch_pipeline(): descriptor set → recorded into one command buffer, + barrier
+mruby-gpu-runtime   dispatch_pipeline(): descriptor set → recorded into one command buffer, + barrier
                     gpu_flush():         submit → fence, once per batch, when a result is read
    ▼
 shader/*.comp       add / sub / mul / div / scale / adds / sum
@@ -200,7 +203,7 @@ remove those — that is what fusing the expression into one shader is for
 ([mruby-gpu-kernel](https://github.com/yujiteshima/mruby-gpu-kernel): 0.35 ms).
 
 Add-on gems can put their own pipelines into the same batch through
-`dispatch_pipeline()` in `src/gpu_internal.h`.
+`dispatch_pipeline()` in mruby-gpu-runtime's `include/gpu_runtime.h`.
 
 ### Limits and failures
 
@@ -238,7 +241,9 @@ library, so it isn't worth the effort yet.
 compute mrbgem (plus camera / face detection / display) for the Pi. This project lifts
 its proven Vulkan core (context init, host-visible buffers with a GC finalizer, generic
 compute dispatch) and builds a Numo-like numeric array on top, dropping the
-image/ML-specific parts.
+image/ML-specific parts. That core has since moved to
+[mruby-gpu-runtime](https://github.com/yujiteshima/mruby-gpu-runtime), so that other GPU
+gems can share it.
 
 ## Contributing
 
