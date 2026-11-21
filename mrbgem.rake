@@ -1,7 +1,7 @@
 MRuby::Gem::Specification.new('mruby-gpu-narray') do |spec|
   spec.license = 'MIT'
   spec.authors = 'Yuji Teshima'
-  spec.version = '0.1.0'
+  spec.version = '0.2.0'
   spec.summary = 'GPU N-dimensional array (Numo-like) for mruby via Vulkan Compute'
 
   # Only dependency is the Vulkan loader. No ncnn / SDL2 / glslang lib / OpenMP.
