@@ -73,7 +73,9 @@ leave every later test without pipelines. Run it on its own:
 This gem does not call Vulkan itself. Buffers, pipelines and dispatches go
 through mruby-gpu-runtime's C API (`gpu_runtime.h`, the `gpu_rt_` functions),
 and the runtime checks every Vulkan result: a failed call raises an mruby
-exception instead of leaving an unusable handle behind. Please keep it that
+exception (`GPU::Error` or a subclass) instead of leaving an unusable handle
+behind. To raise one of those classes here, take it from
+`gpu_rt_error_class`; a shape mismatch is `GPU_RT_ERROR_SHAPE`. Please keep it that
 way, and add what is missing to the runtime rather than including `vulkan.h`
 here.
 

@@ -215,7 +215,11 @@ device's `maxComputeWorkGroupCount` — `GPU.info[:max_workgroups] * 256`
 elements, about 16.7M where that limit is 65535. Larger arrays raise rather
 than leaving the answer up to the driver.
 
-Failed Vulkan calls raise `RuntimeError` with the call and the `VkResult`.
+Failed Vulkan calls raise `GPU::Error` or one of its subclasses
+(`GPU::DeviceError`, `GPU::OutOfMemoryError`, `GPU::UnsupportedError`,
+`GPU::CompileError`) with the operation, the call and the `VkResult`; the
+classes are mruby-gpu-runtime's. Arrays that do not fit each other or the
+operation raise `GPU::ShapeError`, which is an `ArgumentError`.
 A missing shader and a shader the driver rejects are reported differently: the
 first tells you to build the shaders, the second tells you not to bother,
 because the SPIR-V was already there.

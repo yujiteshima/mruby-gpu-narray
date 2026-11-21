@@ -157,12 +157,18 @@ assert_ary("multi-tone peak bins", [5, 11], peaks)
 assert_raise("rfft(non power of two) -> ArgumentError", ArgumentError) do
   GPU::SFloat.new(6).seq.rfft
 end
+assert_raise("rfft(non power of two) -> GPU::ShapeError", GPU::ShapeError) do
+  GPU::SFloat.new(6).seq.rfft
+end
 assert_raise("SComplex#sum -> NoMethodError", NoMethodError) do
   GPU::SFloat.new(8).seq.rfft.sum
 end
 
 # ---- errors ----
 assert_raise("shape mismatch -> ArgumentError", ArgumentError) do
+  GPU::SFloat[1, 2, 3] + GPU::SFloat[1, 2]
+end
+assert_raise("shape mismatch -> GPU::ShapeError", GPU::ShapeError) do
   GPU::SFloat[1, 2, 3] + GPU::SFloat[1, 2]
 end
 assert_raise("scalar * narray -> TypeError", TypeError) do

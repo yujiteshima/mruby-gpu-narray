@@ -29,6 +29,8 @@ def assert_message(label, expect, avoid)
   begin
     yield
   rescue => e
+    # Both cases are failures of the GPU side, not of the caller.
+    return ng(label, "expected a GPU::Error, got #{e.class}: #{e.message}") unless e.is_a?(GPU::Error)
     if !e.message.include?(expect)
       return ng(label, "expected the message to mention #{expect.inspect}, got #{e.message.inspect}")
     end
