@@ -39,14 +39,16 @@ static void ensure_pipeline(mrb_state *mrb, PipeId pipe) {
     case PIPE_READY:
       return;
     case PIPE_MISSING_SPV:
-      mrb_raisef(mrb, E_RUNTIME_ERROR,
+      mrb_raisef(mrb, gpu_rt_error_class(mrb, GPU_RT_ERROR_COMPILE),
         "shader '%s.spv' is not compiled. Run `make -C shader` first.",
         gpu_pipe_name(pipe));
       break;
     case PIPE_CREATE_FAILED:
       /* The SPIR-V was there and the driver refused it, so telling the user
-       * to build the shaders would send them after the wrong problem. */
-      mrb_raisef(mrb, E_RUNTIME_ERROR,
+       * to build the shaders would send them after the wrong problem. The
+       * runtime says which GPU::Error it is: GPU::CompileError, unless the
+       * VkResult is about memory, the device or a missing feature. */
+      mrb_raisef(mrb, gpu_rt_error_class(mrb, g_pipes.error[pipe].kind),
         "the Vulkan driver rejected shader '%s.spv': %s (VkResult %d). "
         "The SPIR-V was found and loaded, so this is a device or driver "
         "limitation, not a missing build step.",
@@ -184,7 +186,7 @@ static mrb_value narray_fill(mrb_state *mrb, mrb_value self) {
 static mrb_value binop_nn(mrb_state *mrb, mrb_value self, gpu_rt_buffer *rhs, PipeId pipe) {
   gpu_rt_buffer *a = gpu_rt_buffer_get(mrb, self);
   if (narray_len(mrb, a) != narray_len(mrb, rhs)) {
-    mrb_raisef(mrb, E_ARGUMENT_ERROR, "shape mismatch: %d vs %d",
+    mrb_raisef(mrb, gpu_rt_error_class(mrb, GPU_RT_ERROR_SHAPE), "shape mismatch: %d vs %d",
                (int)narray_len(mrb, a), (int)narray_len(mrb, rhs));
   }
   ensure_pipeline(mrb, pipe);
@@ -310,7 +312,7 @@ static mrb_value narray_rfft(mrb_state *mrb, mrb_value self) {
   gpu_rt_buffer *a = gpu_rt_buffer_get(mrb, self);
   uint32_t n = narray_len(mrb, a);
   if (n < 2 || (n & (n - 1)) != 0) {
-    mrb_raisef(mrb, E_ARGUMENT_ERROR,
+    mrb_raisef(mrb, gpu_rt_error_class(mrb, GPU_RT_ERROR_SHAPE),
       "rfft needs a power-of-two length >= 2, got %d", (int)n);
   }
   ensure_pipeline(mrb, PIPE_FFT_BITREV);
